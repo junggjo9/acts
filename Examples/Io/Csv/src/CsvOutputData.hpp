@@ -89,7 +89,9 @@ struct MuonDriftCircleData {
   /// Drift radius, in mm.
   float driftRadius = 0.0f;
   /// Drift tube center location in the station frame
-  float tubePositionx = 0.0f, tubePositiony = 0.0f, tubePositionz = 0.0f;
+  float tubePositionx = 0.0f;
+  float tubePositiony = 0.0f;
+  float tubePositionz = 0.0f;
   /// three components of the muon station identifier
   int stationName = 0;
   int stationEta = 0;
@@ -102,6 +104,39 @@ struct MuonDriftCircleData {
   DFE_NAMEDTUPLE(MuonDriftCircleData, driftRadius, tubePositionx, tubePositiony,
                  tubePositionz, stationName, stationEta, stationPhi, multilayer,
                  tubelayer, tube);
+};
+
+struct MuonSpacePointData{
+    /// To which space point bucket does the space point belong to
+    int bucketId{0};
+    /// Local position of the space point within the chamber frame
+    float localPositionX{0.f};
+    float localPositionY{0.f};
+    float localPositionZ{0.f};
+    /// Covariance of the sapce point measurement
+    float covX{0.f};
+    float covXY{0.f};
+    float covYX{0.f};
+    float covY{0.f};
+    /// Drift radius of the measurements
+    float driftR{0.f};
+
+    /// Fields to identify the measurement
+    int stationName{0};
+    int stationEta{0};
+    int stationPhi{0};
+    int gasGap{0};
+
+    int primaryCh{-1};
+    int secondaryCh{-1};
+
+    int measuresEta{0};
+    int measuresPhi{0};
+
+    DFE_NAMEDTUPLE(MuonSpacePointData, bucketId, localPositionX, localPositionY, localPositionZ,
+                   covX, covXY, covYX, covY, driftR,
+                   stationName, stationEta, stationPhi, gasGap, 
+                   primaryCh, secondaryCh, measuresEta, measuresPhi);
 };
 
 struct TruthHitData {

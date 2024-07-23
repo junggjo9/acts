@@ -16,6 +16,7 @@ add_library(
   src/CsvTrackWriter.cpp 
   src/CsvDriftCircleReader.cpp 
   src/CsvMuonSimHitReader.cpp 
+  src/CsvMuonSpacePointReader.cpp 
   src/CsvProtoTrackWriter.cpp
   src/CsvSpacePointWriter.cpp
   src/CsvExaTrkXGraphWriter.cpp

@@ -1,6 +1,6 @@
 // This file is part of the Acts project.
 //
-// Copyright (C) 2021 CERN for the benefit of the Acts project
+// Copyright (C) 2024 CERN for the benefit of the Acts project
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -9,6 +9,7 @@
 #include "Acts/Plugins/Python/Utilities.hpp"
 #include "ActsExamples/EventData/Cluster.hpp"
 #include "ActsExamples/Io/Csv/CsvDriftCircleReader.hpp"
+#include "ActsExamples/Io/Csv/CsvMuonSpacePointReader.hpp"
 #include "ActsExamples/Io/Csv/CsvExaTrkXGraphReader.hpp"
 #include "ActsExamples/Io/Csv/CsvMeasurementReader.hpp"
 #include "ActsExamples/Io/Csv/CsvMuonSimHitReader.hpp"
@@ -76,8 +77,11 @@ void addInput(Context& ctx) {
                              "CsvDriftCircleReader", inputDir, inputStem,
                              outputDriftCircles);
 
-  ACTS_PYTHON_DECLARE_READER(
-      ActsExamples::CsvSpacePointReader, mex, "CsvSpacePointReader", inputDir,
+  ACTS_PYTHON_DECLARE_READER(ActsExamples::CsvMuonSpacePointReader, mex,
+                             "CsvMuonSpacePointReader", inputDir, inputStem,
+                             outputSpacePoints);
+
+  ACTS_PYTHON_DECLARE_READER(ActsExamples::CsvSpacePointReader, mex, "CsvSpacePointReader", inputDir,
       inputStem, inputCollection, outputSpacePoints, extendCollection);
 
   ACTS_PYTHON_DECLARE_READER(ActsExamples::CsvTrackParameterReader, mex,
