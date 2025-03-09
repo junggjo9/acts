@@ -12,7 +12,7 @@ codereport==0.4.0
     # via -r CI/clang_tidy/requirements.in
 fs==2.4.16
     # via codereport
-jinja2==3.1.5
+jinja2==3.1.6
     # via codereport
 markdown-it-py==3.0.0
     # via rich
