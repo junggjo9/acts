@@ -20,7 +20,7 @@
 #include "Acts/Utilities/VectorHelpers.hpp"
 #include "Acts/Geometry/GeometryIdentifier.hpp"
 
-#include "StrawHitGeneratorHelper.hpp"
+#include "../../Core/Seeding/StrawHitGeneratorHelper.hpp"
 
 #include <TFile.h>
 #include <TH1D.h>
