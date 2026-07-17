@@ -65,9 +65,8 @@ class CudaHoughMaximumBatch {
   static_assert(MaximaPerBucket > 0,
                 "MaximaPerBucket must be greater than zero");
 
-  static_assert(
-      MaximaPerBucket <= std::numeric_limits<std::uint32_t>::max(),
-      "MaximaPerBucket must fit into uint32_t");
+  static_assert(MaximaPerBucket <= std::numeric_limits<std::uint32_t>::max(),
+                "MaximaPerBucket must fit into std::uint32_t");
 
   using size_type = std::size_t;
 
@@ -78,8 +77,7 @@ class CudaHoughMaximumBatch {
 
   CudaHoughMaximumBatch(CudaHoughMaximumBatch&& other) noexcept;
 
-  CudaHoughMaximumBatch& operator=(
-      CudaHoughMaximumBatch&& other) noexcept;
+  CudaHoughMaximumBatch& operator=(CudaHoughMaximumBatch&& other) noexcept;
 
   ~CudaHoughMaximumBatch() noexcept;
 
@@ -87,17 +85,13 @@ class CudaHoughMaximumBatch {
     return MaximaPerBucket;
   }
 
-  size_type nBuckets() const noexcept {
-    return m_nBuckets;
-  }
+  size_type nBuckets() const noexcept { return m_nBuckets; }
 
   size_type totalCapacity() const noexcept {
     return nBuckets() * capacityPerBucket();
   }
 
-  bool empty() const noexcept {
-    return nBuckets() == 0;
-  }
+  bool empty() const noexcept { return nBuckets() == 0; }
 
   /// Return the number of stored maxima in one bucket.
   size_type nMaxima(size_type bucket) const;
@@ -128,13 +122,9 @@ class CudaHoughMaximumBatch {
   /// Release all owned device storage.
   void clearDevice() noexcept;
 
-  bool isOnDevice() const noexcept {
-    return m_onDevice;
-  }
+  bool isOnDevice() const noexcept { return m_onDevice; }
 
-  CudaHoughMaximumBatchArrays deviceArrays() const noexcept {
-    return m_device;
-  }
+  CudaHoughMaximumBatchArrays deviceArrays() const noexcept { return m_device; }
 
  private:
   size_type m_nBuckets = 0;
@@ -155,8 +145,7 @@ class CudaHoughMaximumBatch {
   CudaHoughMaximumBatchArrays m_device{};
   bool m_onDevice = false;
 
-  size_type slotIndex(size_type bucket,
-                      size_type maximum) const noexcept {
+  size_type slotIndex(size_type bucket, size_type maximum) const noexcept {
     return bucket * capacityPerBucket() + maximum;
   }
 

@@ -21,41 +21,35 @@ namespace ActsExamples::CudaHoughTransformUtils::EtaHoughTransform {
 namespace detail {
 
 void fillEtaDriftCirclesOnDeviceImpl(
-    CudaHoughPlaneBatch& plane,
-    CudaMuonSpacePointContainer& spacePoints,
-    CudaHoughMaximumBatchArrays maxima,
-    const HoughAxisRanges& axisRanges,
-    YieldType weight,
-    std::uint32_t threadsPerBlock,
-    std::uint32_t numBlocks);
+    CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
+    CudaHoughMaximumBatchArrays maxima, const HoughAxisRanges& axisRanges,
+    YieldType weight, std::uint32_t threadsPerBlock, std::uint32_t numBlocks);
 
 }  // namespace detail
 
 /// Fill the eta Hough planes and find one global maximum in each bucket.
 ///
 /// The returned maximum batch remains allocated on the device. Call
-/// moveToHost() when CPU access is required, but hit association has still to be done.
+/// moveToHost() when CPU access is required, but hit association has still to
+/// be done.
 template <std::size_t MaximaPerBucket = 5u>
-CudaHoughMaximumBatch<MaximaPerBucket>
-fillEtaDriftCirclesOnDevice(
-    CudaHoughPlaneBatch& plane,
-    CudaMuonSpacePointContainer& spacePoints,
-    const HoughAxisRanges& axisRanges,
-    YieldType weight = YieldType{1.0},
-    std::uint32_t threadsPerBlock = 128u,
-    std::uint32_t numBlocks = 0u) {
+CudaHoughMaximumBatch<MaximaPerBucket> fillEtaDriftCirclesOnDevice(
+    CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
+    const HoughAxisRanges& axisRanges, YieldType weight = YieldType{1.0},
+    std::uint32_t threadsPerBlock = 128u, std::uint32_t numBlocks = 0u) {
   if (plane.nBuckets() != spacePoints.bucketCount()) {
-    throw std::invalid_argument("Eta Hough plane and space-point container must have the same bucket count");
+    throw std::invalid_argument(
+        "Eta Hough plane and space-point container must have the same bucket "
+        "count");
   }
 
-  CudaHoughMaximumBatch<MaximaPerBucket> maxima{
-      plane.nBuckets()};
+  CudaHoughMaximumBatch<MaximaPerBucket> maxima{plane.nBuckets()};
 
   maxima.moveToDevice();
 
-  detail::fillEtaDriftCirclesOnDeviceImpl(
-      plane, spacePoints, maxima.deviceArrays(),
-      axisRanges, weight, threadsPerBlock, numBlocks);
+  detail::fillEtaDriftCirclesOnDeviceImpl(plane, spacePoints,
+                                          maxima.deviceArrays(), axisRanges,
+                                          weight, threadsPerBlock, numBlocks);
 
   return maxima;
 }

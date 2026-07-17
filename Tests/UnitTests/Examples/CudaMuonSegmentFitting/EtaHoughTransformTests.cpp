@@ -8,26 +8,22 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include "Acts/Definitions/Units.hpp"
+#include "Acts/Geometry/GeometryIdentifier.hpp"
 #include "Acts/Seeding/HoughTransformUtils.hpp"
+#include "Acts/Utilities/Logger.hpp"
+#include "Acts/Utilities/UnitVectors.hpp"
+#include "Acts/Utilities/VectorHelpers.hpp"
+#include "ActsExamples/Algorithms/TrackFinding/EtaHoughTransform.hpp"
 #include "ActsExamples/EventData/CudaMuonSpacePoint.hpp"
 #include "ActsExamples/Framework/AlgorithmContext.hpp"
 #include "ActsExamples/Framework/DataHandle.hpp"
 #include "ActsExamples/Framework/WhiteBoard.hpp"
 #include "ActsExamples/Utilities/CudaHoughTransformUtils.hpp"
-#include "Acts/Definitions/Units.hpp"
-#include "Acts/Utilities/Logger.hpp"
-#include "Acts/Utilities/UnitVectors.hpp"
-#include "Acts/Utilities/VectorHelpers.hpp"
-#include "Acts/Geometry/GeometryIdentifier.hpp"
-#include "ActsExamples/Algorithms/TrackFinding/EtaHoughTransform.hpp"
-
-#include "../../Core/Seeding/StrawHitGeneratorHelper.hpp"
-
-#include <TFile.h>
-#include <TH1D.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -35,7 +31,11 @@
 #include <iomanip>
 #include <limits>
 #include <vector>
-#include <cstddef>
+
+#include <TFile.h>
+#include <TH1D.h>
+
+#include "../../Core/Seeding/StrawHitGeneratorHelper.hpp"
 
 namespace ActsTests {
 
@@ -198,15 +198,16 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
   constexpr std::size_t bucketId = 0u;
   constexpr std::size_t maximumId = 0u;
 
-  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{-3.0, 3.0, -100.0 * Acts::UnitConstants::m, 100.0 * Acts::UnitConstants::m};
+  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
+      -3.0, 3.0, -100.0 * Acts::UnitConstants::m,
+      100.0 * Acts::UnitConstants::m};
 
   CudaHT::CudaHoughPlaneBatch plane{{25, 15}, 1};
 
   // The current global-maximum finder writes one maximum per bucket. The
   // container still reserves 5 slots per bucket for future peak finders.
-  auto maxima =
-      CudaHT::EtaHoughTransform::fillEtaDriftCirclesOnDevice<5>(
-          plane, spacePoints, axisRanges);
+  auto maxima = CudaHT::EtaHoughTransform::fillEtaDriftCirclesOnDevice<5>(
+      plane, spacePoints, axisRanges);
 
   // Both objects remain device-backed after the transform.
   maxima.moveToHost();
@@ -218,79 +219,51 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
   const std::size_t xBin = maxima.xBin(bucketId, maximumId);
   const std::size_t yBin = maxima.yBin(bucketId, maximumId);
 
-  const double foundTanTheta =
-      maxima.tanBeta(bucketId, maximumId);
+  const double foundTanTheta = maxima.tanBeta(bucketId, maximumId);
 
-  const double foundInterceptY =
-      maxima.interceptY(bucketId, maximumId);
+  const double foundInterceptY = maxima.interceptY(bucketId, maximumId);
 
-  const auto [planeXBin, planeYBin] =
-      plane.locMaxHits(bucketId);
+  const auto [planeXBin, planeYBin] = plane.locMaxHits(bucketId);
 
   BOOST_TEST_MESSAGE("Maximum bin: x=" << xBin << ", y=" << yBin);
-  BOOST_TEST_MESSAGE(
-      "Maximum parameters: tanTheta="
-      << foundTanTheta
-      << ", interceptY=" << foundInterceptY);
-  BOOST_TEST_MESSAGE(
-      "Maximum hits: "
-      << maxima.nHits(bucketId, maximumId));
-  BOOST_TEST_MESSAGE(
-      "Maximum layers: "
-      << maxima.nLayers(bucketId, maximumId));
+  BOOST_TEST_MESSAGE("Maximum parameters: tanTheta="
+                     << foundTanTheta << ", interceptY=" << foundInterceptY);
+  BOOST_TEST_MESSAGE("Maximum hits: " << maxima.nHits(bucketId, maximumId));
+  BOOST_TEST_MESSAGE("Maximum layers: " << maxima.nLayers(bucketId, maximumId));
 
   BOOST_CHECK_EQUAL(xBin, planeXBin);
   BOOST_CHECK_EQUAL(yBin, planeYBin);
 
-  BOOST_CHECK_EQUAL(
-      maxima.nHits(bucketId, maximumId),
-      plane.nHits(bucketId, xBin, yBin));
+  BOOST_CHECK_EQUAL(maxima.nHits(bucketId, maximumId),
+                    plane.nHits(bucketId, xBin, yBin));
 
-  BOOST_CHECK_EQUAL(
-      maxima.nLayers(bucketId, maximumId),
-      plane.nLayers(bucketId, xBin, yBin));
+  BOOST_CHECK_EQUAL(maxima.nLayers(bucketId, maximumId),
+                    plane.nLayers(bucketId, xBin, yBin));
 
-  BOOST_CHECK_EQUAL(
-      maxima.layerMask(bucketId, maximumId),
-      plane.layerMask(bucketId, xBin, yBin));
+  BOOST_CHECK_EQUAL(maxima.layerMask(bucketId, maximumId),
+                    plane.layerMask(bucketId, xBin, yBin));
 
-  const auto bucketRanges =
-      plane.bucketAxisRanges(bucketId, axisRanges);
+  const auto bucketRanges = plane.bucketAxisRanges(bucketId, axisRanges);
 
-  const double expectedBinTanTheta =
-      Acts::HoughTransformUtils::binCenter(
-          bucketRanges.xMin,
-          bucketRanges.xMax,
-          plane.nBinsX(),
-          xBin);
+  const double expectedBinTanTheta = Acts::HoughTransformUtils::binCenter(
+      bucketRanges.xMin, bucketRanges.xMax, plane.nBinsX(), xBin);
 
-  const double expectedBinInterceptY =
-      Acts::HoughTransformUtils::binCenter(
-          bucketRanges.yMin,
-          bucketRanges.yMax,
-          plane.nBinsY(),
-          yBin);
+  const double expectedBinInterceptY = Acts::HoughTransformUtils::binCenter(
+      bucketRanges.yMin, bucketRanges.yMax, plane.nBinsY(), yBin);
 
-  BOOST_CHECK_CLOSE(
-      foundTanTheta, expectedBinTanTheta, 1.0e-10);
+  BOOST_CHECK_CLOSE(foundTanTheta, expectedBinTanTheta, 1.0e-10);
 
-  BOOST_CHECK_CLOSE(
-      foundInterceptY, expectedBinInterceptY, 1.0e-10);
+  BOOST_CHECK_CLOSE(foundInterceptY, expectedBinInterceptY, 1.0e-10);
 
-  BOOST_CHECK_SMALL(
-      std::abs(foundTanTheta - expectedTanTheta), 0.2);
+  BOOST_CHECK_SMALL(std::abs(foundTanTheta - expectedTanTheta), 0.2);
 
-  BOOST_CHECK_CLOSE(
-      foundInterceptY, expectedInterceptY, 10.0);
+  BOOST_CHECK_CLOSE(foundInterceptY, expectedInterceptY, 10.0);
 
-  BOOST_CHECK_GE(
-      maxima.nHits(bucketId, maximumId), 3.0f);
+  BOOST_CHECK_GE(maxima.nHits(bucketId, maximumId), 3.0f);
 
-  BOOST_CHECK_GE(
-      maxima.nLayers(bucketId, maximumId), 3.0f);
+  BOOST_CHECK_GE(maxima.nLayers(bucketId, maximumId), 3.0f);
 
-  const std::filesystem::path outputDirectory =
-      std::filesystem::current_path();
+  const std::filesystem::path outputDirectory = std::filesystem::current_path();
 
   const std::filesystem::path hitsCsv =
       outputDirectory / "cuda_hough_visual_hits.csv";
@@ -301,13 +274,10 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
   writeFirstBucketHitsCsv(hitsCsv, spacePoints);
   writeHoughHistogramCsv(histogramCsv, plane, bucketRanges);
 
-  BOOST_TEST_MESSAGE(
-      "Wrote Hough visual debug hits to: "
-      << hitsCsv.string());
+  BOOST_TEST_MESSAGE("Wrote Hough visual debug hits to: " << hitsCsv.string());
 
   BOOST_TEST_MESSAGE(
-      "Wrote Hough visual debug histogram to: "
-      << histogramCsv.string());
+      "Wrote Hough visual debug histogram to: " << histogramCsv.string());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -8,25 +8,21 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include "Acts/Definitions/Units.hpp"
+#include "Acts/Geometry/GeometryIdentifier.hpp"
 #include "Acts/Seeding/HoughTransformUtils.hpp"
+#include "Acts/Utilities/Logger.hpp"
+#include "Acts/Utilities/UnitVectors.hpp"
+#include "Acts/Utilities/VectorHelpers.hpp"
 #include "ActsExamples/EventData/CudaMuonSpacePoint.hpp"
 #include "ActsExamples/Framework/AlgorithmContext.hpp"
 #include "ActsExamples/Framework/DataHandle.hpp"
 #include "ActsExamples/Framework/WhiteBoard.hpp"
 #include "ActsExamples/Utilities/CudaHoughTransformUtils.hpp"
-#include "Acts/Definitions/Units.hpp"
-#include "Acts/Utilities/Logger.hpp"
-#include "Acts/Utilities/UnitVectors.hpp"
-#include "Acts/Utilities/VectorHelpers.hpp"
-#include "Acts/Geometry/GeometryIdentifier.hpp"
-
-#include "../../Core/Seeding/StrawHitGeneratorHelper.hpp"
-
-#include <TFile.h>
-#include <TH1D.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -34,7 +30,11 @@
 #include <iomanip>
 #include <limits>
 #include <vector>
-#include <cstddef>
+
+#include <TFile.h>
+#include <TH1D.h>
+
+#include "../../Core/Seeding/StrawHitGeneratorHelper.hpp"
 
 namespace ActsTests {
 
@@ -231,8 +231,8 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_csv_visual_example) {
   std::uint32_t bucketId = 0;
 
   // The axis has to be relatively small, as plane is very sparse.
-  Acts::HoughTransformUtils::HoughAxisRanges axisRanges{-3.0, 3.0, -100.0 * Acts::UnitConstants::m,
-                                                        100.0 * Acts::UnitConstants::m};
+  Acts::HoughTransformUtils::HoughAxisRanges axisRanges{-3.0, 3.0, -100.0 *
+Acts::UnitConstants::m, 100.0 * Acts::UnitConstants::m};
   // Find how we could get the axisRanges back
 
   CudaHT::CudaHoughPlaneBatch plane{{15, 15}, 1};
@@ -244,7 +244,8 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_csv_visual_example) {
 
   BOOST_TEST_MESSAGE("Found xBin: " << xBin);
   BOOST_TEST_MESSAGE("plane.nBinsX() " << plane.nBinsX());
-  BOOST_TEST_MESSAGE("axisRanges: " << axisRanges.xMin << " " << axisRanges.xMax);
+  BOOST_TEST_MESSAGE("axisRanges: " << axisRanges.xMin << " " <<
+axisRanges.xMax);
 
   const double foundTanTheta = Acts::HoughTransformUtils::binCenter(
       axisRanges.xMin, axisRanges.xMax, plane.nBinsX(), xBin);
@@ -259,7 +260,8 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_csv_visual_example) {
       outDir / "cuda_hough_visual_histogram.csv";
 
   writeDriftCircleCsv(hitsCsv);
-    Acts::HoughTransformUtils::HoughAxisRanges newRanges{axisRanges.xMin, axisRanges.xMax, plane.yMin(bucketId), plane.yMax(bucketId)};
+    Acts::HoughTransformUtils::HoughAxisRanges newRanges{axisRanges.xMin,
+axisRanges.xMax, plane.yMin(bucketId), plane.yMax(bucketId)};
   writeHoughHistogramCsv(histCsv, plane, newRanges);
 
   BOOST_TEST_MESSAGE("Wrote Hough visual debug hits to: " << hitsCsv.string());
@@ -272,8 +274,9 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_csv_visual_example) {
   BOOST_TEST_MESSAGE("Max hits: " << plane.maxHits(bucketId));
   BOOST_TEST_MESSAGE("Max layers: " << plane.maxLayers(0));
 
-  // Check if relative error is low and absolute is low 
-  BOOST_CHECK(foundTanTheta / expectedTanTheta <= 0.5 && abs(foundTanTheta - expectedTanTheta) <= 2);
+  // Check if relative error is low and absolute is low
+  BOOST_CHECK(foundTanTheta / expectedTanTheta <= 0.5 && abs(foundTanTheta -
+expectedTanTheta) <= 2);
 
   BOOST_CHECK_CLOSE(foundInterceptY, expectedInterceptY, 10.0);
 
@@ -333,8 +336,8 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_mdt_root_first_event_whole_event_sanity) {
     BOOST_CHECK_LE(spacePoints.bucketEnd(bucket), spacePoints.size());
   }
 
-  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{-3.0, 3.0, -100.0 * Acts::UnitConstants::m,
-                                                        100.0 * Acts::UnitConstants::m};
+  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{-3.0, 3.0, -100.0
+* Acts::UnitConstants::m, 100.0 * Acts::UnitConstants::m};
 
   CudaHT::CudaHoughPlaneBatch plane{{15, 15}, spacePoints.bucketCount()};
 
@@ -414,7 +417,6 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_mdt_root_first_event_whole_event_sanity) {
   BOOST_TEST_MESSAGE("Bucket 0 max layers: " << plane.maxLayers(0));
 }
 */
-
 
 BOOST_AUTO_TEST_SUITE_END()
 

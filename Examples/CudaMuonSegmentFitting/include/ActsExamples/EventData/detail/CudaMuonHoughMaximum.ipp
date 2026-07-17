@@ -42,32 +42,32 @@ void freeHoughMaximumColumn(T*& deviceColumn) noexcept {
 }
 
 template <typename T>
-void copyHoughMaximumColumnToDevice(
-    T* deviceColumn, const std::vector<T>& hostColumn) {
+void copyHoughMaximumColumnToDevice(T* deviceColumn,
+                                    const std::vector<T>& hostColumn) {
   if (hostColumn.empty()) {
     return;
   }
 
-  cudaHoughMaximumCheck(
-      cudaMemcpy(deviceColumn, hostColumn.data(),
-                 hostColumn.size() * sizeof(T), cudaMemcpyHostToDevice));
+  cudaHoughMaximumCheck(cudaMemcpy(deviceColumn, hostColumn.data(),
+                                   hostColumn.size() * sizeof(T),
+                                   cudaMemcpyHostToDevice));
 }
 
 template <typename T>
-void copyHoughMaximumColumnToHost(
-    std::vector<T>& hostColumn, const T* deviceColumn) {
+void copyHoughMaximumColumnToHost(std::vector<T>& hostColumn,
+                                  const T* deviceColumn) {
   if (hostColumn.empty() || deviceColumn == nullptr) {
     return;
   }
 
-  cudaHoughMaximumCheck(
-      cudaMemcpy(hostColumn.data(), deviceColumn,
-                 hostColumn.size() * sizeof(T), cudaMemcpyDeviceToHost));
+  cudaHoughMaximumCheck(cudaMemcpy(hostColumn.data(), deviceColumn,
+                                   hostColumn.size() * sizeof(T),
+                                   cudaMemcpyDeviceToHost));
 }
 
-inline void allocateHoughMaximumDeviceData(
-    CudaHoughMaximumBatchArrays& device, std::size_t totalCapacity,
-    std::size_t nBuckets) {
+inline void allocateHoughMaximumDeviceData(CudaHoughMaximumBatchArrays& device,
+                                           std::size_t totalCapacity,
+                                           std::size_t nBuckets) {
   allocateHoughMaximumColumn(device.tanBeta, totalCapacity);
   allocateHoughMaximumColumn(device.interceptY, totalCapacity);
 
@@ -114,21 +114,20 @@ CudaHoughMaximumBatch<MaximaPerBucket>::CudaHoughMaximumBatch(
 
   if (m_nBuckets > maxUint32) {
     throw std::overflow_error(
-        "CudaHoughMaximumBatch nBuckets must fit into uint32_t");
+        "CudaHoughMaximumBatch nBuckets must fit into std::uint32_t");
   }
 
-  if (m_nBuckets >
-      std::numeric_limits<size_type>::max() / MaximaPerBucket) {
+  if (m_nBuckets > std::numeric_limits<size_type>::max() / MaximaPerBucket) {
     throw std::overflow_error(
-        "CudaHoughMaximumBatch total capacity overflows size_t");
+        "CudaHoughMaximumBatch total capacity overflows std::size_t");
   }
 
   const size_type capacity = totalCapacity();
 
-  // CudaHoughMaximumBatchArrays::index returns uint32_t.
+  // CudaHoughMaximumBatchArrays::index returns std::uint32_t.
   if (capacity > maxUint32) {
     throw std::overflow_error(
-        "CudaHoughMaximumBatch total capacity must fit into uint32_t");
+        "CudaHoughMaximumBatch total capacity must fit into std::uint32_t");
   }
 
   m_hostTanBeta.resize(capacity, CoordType{0.});
@@ -156,8 +155,7 @@ CudaHoughMaximumBatch<MaximaPerBucket>::CudaHoughMaximumBatch(
       m_hostXBin{std::move(other.m_hostXBin)},
       m_hostYBin{std::move(other.m_hostYBin)},
       m_hostNMaxima{std::move(other.m_hostNMaxima)},
-      m_device{
-          std::exchange(other.m_device, CudaHoughMaximumBatchArrays{})},
+      m_device{std::exchange(other.m_device, CudaHoughMaximumBatchArrays{})},
       m_onDevice{std::exchange(other.m_onDevice, false)} {}
 
 template <std::size_t MaximaPerBucket>
@@ -184,8 +182,7 @@ CudaHoughMaximumBatch<MaximaPerBucket>::operator=(
 
   m_hostNMaxima = std::move(other.m_hostNMaxima);
 
-  m_device =
-      std::exchange(other.m_device, CudaHoughMaximumBatchArrays{});
+  m_device = std::exchange(other.m_device, CudaHoughMaximumBatchArrays{});
   m_onDevice = std::exchange(other.m_onDevice, false);
 
   return *this;
@@ -201,8 +198,7 @@ typename CudaHoughMaximumBatch<MaximaPerBucket>::size_type
 CudaHoughMaximumBatch<MaximaPerBucket>::nMaxima(size_type bucket) const {
   checkBucket(bucket);
 
-  const size_type count =
-      static_cast<size_type>(m_hostNMaxima[bucket]);
+  const size_type count = static_cast<size_type>(m_hostNMaxima[bucket]);
 
   if (count > capacityPerBucket()) {
     throw std::runtime_error(
@@ -249,55 +245,44 @@ LayerMask CudaHoughMaximumBatch<MaximaPerBucket>::layerMask(
 
 template <std::size_t MaximaPerBucket>
 typename CudaHoughMaximumBatch<MaximaPerBucket>::size_type
-CudaHoughMaximumBatch<MaximaPerBucket>::xBin(
-    size_type bucket, size_type maximum) const {
+CudaHoughMaximumBatch<MaximaPerBucket>::xBin(size_type bucket,
+                                             size_type maximum) const {
   checkMaximum(bucket, maximum);
-  return static_cast<size_type>(
-      m_hostXBin[slotIndex(bucket, maximum)]);
+  return static_cast<size_type>(m_hostXBin[slotIndex(bucket, maximum)]);
 }
 
 template <std::size_t MaximaPerBucket>
 typename CudaHoughMaximumBatch<MaximaPerBucket>::size_type
-CudaHoughMaximumBatch<MaximaPerBucket>::yBin(
-    size_type bucket, size_type maximum) const {
+CudaHoughMaximumBatch<MaximaPerBucket>::yBin(size_type bucket,
+                                             size_type maximum) const {
   checkMaximum(bucket, maximum);
-  return static_cast<size_type>(
-      m_hostYBin[slotIndex(bucket, maximum)]);
+  return static_cast<size_type>(m_hostYBin[slotIndex(bucket, maximum)]);
 }
 
 template <std::size_t MaximaPerBucket>
 void CudaHoughMaximumBatch<MaximaPerBucket>::moveToDevice() {
   clearDevice();
 
-  m_device.nBuckets =
-      static_cast<std::uint32_t>(nBuckets());
+  m_device.nBuckets = static_cast<std::uint32_t>(nBuckets());
 
-  m_device.capacityPerBucket =
-      static_cast<std::uint32_t>(capacityPerBucket());
+  m_device.capacityPerBucket = static_cast<std::uint32_t>(capacityPerBucket());
 
   try {
-    detail::allocateHoughMaximumDeviceData(
-        m_device, totalCapacity(), nBuckets());
+    detail::allocateHoughMaximumDeviceData(m_device, totalCapacity(),
+                                           nBuckets());
 
-    detail::copyHoughMaximumColumnToDevice(
-        m_device.tanBeta, m_hostTanBeta);
-    detail::copyHoughMaximumColumnToDevice(
-        m_device.interceptY, m_hostInterceptY);
+    detail::copyHoughMaximumColumnToDevice(m_device.tanBeta, m_hostTanBeta);
+    detail::copyHoughMaximumColumnToDevice(m_device.interceptY,
+                                           m_hostInterceptY);
 
-    detail::copyHoughMaximumColumnToDevice(
-        m_device.nHits, m_hostHits);
-    detail::copyHoughMaximumColumnToDevice(
-        m_device.nLayers, m_hostLayers);
-    detail::copyHoughMaximumColumnToDevice(
-        m_device.layerMask, m_hostLayerMask);
+    detail::copyHoughMaximumColumnToDevice(m_device.nHits, m_hostHits);
+    detail::copyHoughMaximumColumnToDevice(m_device.nLayers, m_hostLayers);
+    detail::copyHoughMaximumColumnToDevice(m_device.layerMask, m_hostLayerMask);
 
-    detail::copyHoughMaximumColumnToDevice(
-        m_device.xBin, m_hostXBin);
-    detail::copyHoughMaximumColumnToDevice(
-        m_device.yBin, m_hostYBin);
+    detail::copyHoughMaximumColumnToDevice(m_device.xBin, m_hostXBin);
+    detail::copyHoughMaximumColumnToDevice(m_device.yBin, m_hostYBin);
 
-    detail::copyHoughMaximumColumnToDevice(
-        m_device.nMaxima, m_hostNMaxima);
+    detail::copyHoughMaximumColumnToDevice(m_device.nMaxima, m_hostNMaxima);
   } catch (...) {
     clearDevice();
     throw;
@@ -312,39 +297,29 @@ void CudaHoughMaximumBatch<MaximaPerBucket>::moveToHost() {
     return;
   }
 
-  detail::copyHoughMaximumColumnToHost(
-      m_hostTanBeta, m_device.tanBeta);
-  detail::copyHoughMaximumColumnToHost(
-      m_hostInterceptY, m_device.interceptY);
+  detail::copyHoughMaximumColumnToHost(m_hostTanBeta, m_device.tanBeta);
+  detail::copyHoughMaximumColumnToHost(m_hostInterceptY, m_device.interceptY);
 
-  detail::copyHoughMaximumColumnToHost(
-      m_hostHits, m_device.nHits);
-  detail::copyHoughMaximumColumnToHost(
-      m_hostLayers, m_device.nLayers);
-  detail::copyHoughMaximumColumnToHost(
-      m_hostLayerMask, m_device.layerMask);
+  detail::copyHoughMaximumColumnToHost(m_hostHits, m_device.nHits);
+  detail::copyHoughMaximumColumnToHost(m_hostLayers, m_device.nLayers);
+  detail::copyHoughMaximumColumnToHost(m_hostLayerMask, m_device.layerMask);
 
-  detail::copyHoughMaximumColumnToHost(
-      m_hostXBin, m_device.xBin);
-  detail::copyHoughMaximumColumnToHost(
-      m_hostYBin, m_device.yBin);
+  detail::copyHoughMaximumColumnToHost(m_hostXBin, m_device.xBin);
+  detail::copyHoughMaximumColumnToHost(m_hostYBin, m_device.yBin);
 
-  detail::copyHoughMaximumColumnToHost(
-      m_hostNMaxima, m_device.nMaxima);
+  detail::copyHoughMaximumColumnToHost(m_hostNMaxima, m_device.nMaxima);
 }
 
 template <std::size_t MaximaPerBucket>
 void CudaHoughMaximumBatch<MaximaPerBucket>::resetOnDevice() {
   if (!m_onDevice) {
-    throw std::logic_error(
-        "CudaHoughMaximumBatch is not on the device");
+    throw std::logic_error("CudaHoughMaximumBatch is not on the device");
   }
 
   std::fill(m_hostNMaxima.begin(), m_hostNMaxima.end(), 0u);
 
   detail::cudaHoughMaximumCheck(
-      cudaMemset(m_device.nMaxima, 0,
-                 nBuckets() * sizeof(std::uint32_t)));
+      cudaMemset(m_device.nMaxima, 0, nBuckets() * sizeof(std::uint32_t)));
 }
 
 template <std::size_t MaximaPerBucket>
@@ -359,8 +334,7 @@ template <std::size_t MaximaPerBucket>
 void CudaHoughMaximumBatch<MaximaPerBucket>::checkBucket(
     size_type bucket) const {
   if (bucket >= nBuckets()) {
-    throw std::out_of_range(
-        "CudaHoughMaximumBatch bucket index out of range");
+    throw std::out_of_range("CudaHoughMaximumBatch bucket index out of range");
   }
 }
 
@@ -370,8 +344,7 @@ void CudaHoughMaximumBatch<MaximaPerBucket>::checkMaximum(
   const size_type count = nMaxima(bucket);
 
   if (maximum >= count) {
-    throw std::out_of_range(
-        "CudaHoughMaximumBatch maximum index out of range");
+    throw std::out_of_range("CudaHoughMaximumBatch maximum index out of range");
   }
 }
 

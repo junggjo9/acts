@@ -50,8 +50,8 @@ __device__ inline bool notInMask(const LayerMask oldMask, const LayerMask bit) {
 /// @return the parameter value at the bin center.
 /// No special logic to prevent over-/underflow, checking these is
 /// left to the caller
-__device__ inline double binCenterDevice(double min, double max, unsigned nSteps,
-                                  unsigned binIndex) {
+__device__ inline double binCenterDevice(double min, double max,
+                                         unsigned nSteps, unsigned binIndex) {
   return min + (max - min) * 0.5 * (2.0 * binIndex + 1.0) / nSteps;
 }
 
@@ -65,16 +65,17 @@ __device__ inline double binCenterDevice(double min, double max, unsigned nSteps
 /// No special logic to prevent over-/underflow, checking these is
 /// left to the caller
 __device__ inline int binIndexDevice(double min, double max, unsigned nSteps,
-                              double val) {
+                                     double val) {
   return static_cast<int>((val - min) / (max - min) * nSteps);
 }
 
 /// @brief Fill one bin in shared memory
-__device__ inline void fillSharedBin(
-    YieldType* sharedHits, YieldType* sharedLayers,
-    LayerMask* sharedLayerMask, std::uint32_t nBinsX,
-    std::uint32_t xBin, std::uint32_t yBin,
-    unsigned layer, YieldType weight) {
+__device__ inline void fillSharedBin(YieldType* sharedHits,
+                                     YieldType* sharedLayers,
+                                     LayerMask* sharedLayerMask,
+                                     std::uint32_t nBinsX, std::uint32_t xBin,
+                                     std::uint32_t yBin, unsigned layer,
+                                     YieldType weight) {
   const std::uint32_t localBin = yBin * nBinsX + xBin;
 
   atomicAdd(&sharedHits[localBin], weight);
@@ -85,8 +86,7 @@ __device__ inline void fillSharedBin(
     return;
   }
 
-  const LayerMask oldMask =
-      atomicOr(&sharedLayerMask[localBin], bit);
+  const LayerMask oldMask = atomicOr(&sharedLayerMask[localBin], bit);
 
   if (notInMask(oldMask, bit)) {
     atomicAdd(&sharedLayers[localBin], weight);
@@ -95,20 +95,15 @@ __device__ inline void fillSharedBin(
 
 /// @brief Fill bins in Y-column
 __device__ inline void fillSharedYBand(
-    YieldType* sharedHits, YieldType* sharedLayers,
-    LayerMask* sharedLayerMask,
-    const CudaHoughPlaneBatchArrays plane,
-    const HoughAxisRanges ranges,
-    std::uint32_t xBin, CoordType yCenter,
-    CoordType yHalfWidth, unsigned layer,
+    YieldType* sharedHits, YieldType* sharedLayers, LayerMask* sharedLayerMask,
+    const CudaHoughPlaneBatchArrays plane, const HoughAxisRanges ranges,
+    std::uint32_t xBin, CoordType yCenter, CoordType yHalfWidth, unsigned layer,
     YieldType weight) {
-  int yBinDown =
-      binIndexDevice(ranges.yMin, ranges.yMax, plane.nBinsY,
-                     yCenter - yHalfWidth);
+  int yBinDown = binIndexDevice(ranges.yMin, ranges.yMax, plane.nBinsY,
+                                yCenter - yHalfWidth);
 
-  int yBinUp =
-      binIndexDevice(ranges.yMin, ranges.yMax, plane.nBinsY,
-                     yCenter + yHalfWidth);
+  int yBinUp = binIndexDevice(ranges.yMin, ranges.yMax, plane.nBinsY,
+                              yCenter + yHalfWidth);
 
   if (yBinDown > yBinUp) {
     const int temporary = yBinDown;
@@ -126,11 +121,8 @@ __device__ inline void fillSharedYBand(
 
   // Top hat add, so 1 for all values
   for (int yBin = yBinDown; yBin <= yBinUp; ++yBin) {
-    fillSharedBin(
-        sharedHits, sharedLayers, sharedLayerMask,
-        plane.nBinsX, xBin,
-        static_cast<std::uint32_t>(yBin),
-        layer, weight);
+    fillSharedBin(sharedHits, sharedLayers, sharedLayerMask, plane.nBinsX, xBin,
+                  static_cast<std::uint32_t>(yBin), layer, weight);
   }
 }
 
@@ -139,16 +131,13 @@ __device__ inline void fillSharedYBand(
 namespace ActsExamples::CudaHoughTransformUtils::PeakFinders {
 
 struct GlobalMaximumCandidate {
-  YieldType nHits =
-      -std::numeric_limits<YieldType>::infinity();
+  YieldType nHits = -std::numeric_limits<YieldType>::infinity();
 
-  std::uint32_t localBin =
-      std::numeric_limits<std::uint32_t>::max();
+  std::uint32_t localBin = std::numeric_limits<std::uint32_t>::max();
 };
 
-__device__ inline bool betterCandidate(
-    const GlobalMaximumCandidate& candidate,
-    const GlobalMaximumCandidate& current) {
+__device__ inline bool betterCandidate(const GlobalMaximumCandidate& candidate,
+                                       const GlobalMaximumCandidate& current) {
   if (candidate.nHits > current.nHits) {
     return true;
   }
@@ -161,16 +150,13 @@ __device__ inline bool betterCandidate(
 ///
 /// sharedCandidates must contain at least blockDim.x entries.
 __device__ inline GlobalMaximumCandidate findGlobalMaximum(
-    const YieldType* sharedHits,
-    std::uint32_t nCells,
+    const YieldType* sharedHits, std::uint32_t nCells,
     GlobalMaximumCandidate* sharedCandidates) {
   GlobalMaximumCandidate localMaximum{};
 
-  for (std::uint32_t localBin = threadIdx.x;
-       localBin < nCells;
+  for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
        localBin += blockDim.x) {
-    const GlobalMaximumCandidate candidate{
-        sharedHits[localBin], localBin};
+    const GlobalMaximumCandidate candidate{sharedHits[localBin], localBin};
 
     if (betterCandidate(candidate, localMaximum)) {
       localMaximum = candidate;
@@ -181,21 +167,15 @@ __device__ inline GlobalMaximumCandidate findGlobalMaximum(
   __syncthreads();
 
   // Works for both power-of-two and non-power-of-two block sizes.
-  for (std::uint32_t active = blockDim.x;
-       active > 1u;) {
-    const std::uint32_t nextActive =
-        (active + 1u) / 2u;
+  for (std::uint32_t active = blockDim.x; active > 1u;) {
+    const std::uint32_t nextActive = (active + 1u) / 2u;
 
     if (threadIdx.x < nextActive) {
-      const std::uint32_t partner =
-          threadIdx.x + nextActive;
+      const std::uint32_t partner = threadIdx.x + nextActive;
 
-      if (partner < active &&
-          betterCandidate(
-              sharedCandidates[partner],
-              sharedCandidates[threadIdx.x])) {
-        sharedCandidates[threadIdx.x] =
-            sharedCandidates[partner];
+      if (partner < active && betterCandidate(sharedCandidates[partner],
+                                              sharedCandidates[threadIdx.x])) {
+        sharedCandidates[threadIdx.x] = sharedCandidates[partner];
       }
     }
 
@@ -207,15 +187,13 @@ __device__ inline GlobalMaximumCandidate findGlobalMaximum(
 }
 
 __device__ inline std::uint32_t reserveMaximumSlot(
-    CudaHoughMaximumBatchArrays maxima,
-    std::uint32_t bucket) {
+    CudaHoughMaximumBatchArrays maxima, std::uint32_t bucket) {
   std::uint32_t* counter = &maxima.nMaxima[bucket];
 
   std::uint32_t current = atomicCAS(counter, 0u, 0u);
 
   while (current < maxima.capacityPerBucket) {
-    const std::uint32_t observed =
-        atomicCAS(counter, current, current + 1u);
+    const std::uint32_t observed = atomicCAS(counter, current, current + 1u);
 
     if (observed == current) {
       return current;
@@ -228,51 +206,37 @@ __device__ inline std::uint32_t reserveMaximumSlot(
 }
 
 __device__ inline bool appendEtaMaximum(
-    CudaHoughMaximumBatchArrays maxima,
-    const CudaHoughPlaneBatchArrays plane,
-    const HoughAxisRanges ranges,
-    const YieldType* sharedLayers,
-    const LayerMask* sharedLayerMask,
-    std::uint32_t bucket,
+    CudaHoughMaximumBatchArrays maxima, const CudaHoughPlaneBatchArrays plane,
+    const HoughAxisRanges ranges, const YieldType* sharedLayers,
+    const LayerMask* sharedLayerMask, std::uint32_t bucket,
     const GlobalMaximumCandidate& candidate) {
   if (candidate.nHits <= YieldType{0.0} ||
-      candidate.localBin ==
-          std::numeric_limits<std::uint32_t>::max()) {
+      candidate.localBin == std::numeric_limits<std::uint32_t>::max()) {
     return false;
   }
 
-  const std::uint32_t maximum =
-      reserveMaximumSlot(maxima, bucket);
+  const std::uint32_t maximum = reserveMaximumSlot(maxima, bucket);
 
   if (maximum >= maxima.capacityPerBucket) {
     return false;
   }
 
-  const std::uint32_t xBin =
-      candidate.localBin % plane.nBinsX;
+  const std::uint32_t xBin = candidate.localBin % plane.nBinsX;
 
-  const std::uint32_t yBin =
-      candidate.localBin / plane.nBinsX;
+  const std::uint32_t yBin = candidate.localBin / plane.nBinsX;
 
-  const std::uint32_t outputIndex =
-      maxima.index(bucket, maximum);
+  const std::uint32_t outputIndex = maxima.index(bucket, maximum);
 
   maxima.tanBeta[outputIndex] =
-      detail::binCenterDevice(
-          ranges.xMin, ranges.xMax,
-          plane.nBinsX, xBin);
+      detail::binCenterDevice(ranges.xMin, ranges.xMax, plane.nBinsX, xBin);
 
   maxima.interceptY[outputIndex] =
-      detail::binCenterDevice(
-          ranges.yMin, ranges.yMax,
-          plane.nBinsY, yBin);
+      detail::binCenterDevice(ranges.yMin, ranges.yMax, plane.nBinsY, yBin);
 
   maxima.nHits[outputIndex] = candidate.nHits;
-  maxima.nLayers[outputIndex] =
-      sharedLayers[candidate.localBin];
+  maxima.nLayers[outputIndex] = sharedLayers[candidate.localBin];
 
-  maxima.layerMask[outputIndex] =
-      sharedLayerMask[candidate.localBin];
+  maxima.layerMask[outputIndex] = sharedLayerMask[candidate.localBin];
 
   maxima.xBin[outputIndex] = xBin;
   maxima.yBin[outputIndex] = yBin;
@@ -284,22 +248,16 @@ __device__ inline bool appendEtaMaximum(
 
 namespace ActsExamples::CudaHoughTransformUtils::detail {
 
-inline std::size_t sharedBytesForEtaHough(
-    std::size_t nCells,
-    std::size_t threadsPerBlock) {
-  std::size_t bytes =
-      2u * nCells * sizeof(YieldType);
+inline std::size_t sharedBytesForEtaHough(std::size_t nCells,
+                                          std::size_t threadsPerBlock) {
+  std::size_t bytes = 2u * nCells * sizeof(YieldType);
 
   bytes = alignUp(bytes, alignof(LayerMask));
   bytes += nCells * sizeof(LayerMask);
 
-  bytes = alignUp(
-      bytes,
-      alignof(PeakFinders::GlobalMaximumCandidate));
+  bytes = alignUp(bytes, alignof(PeakFinders::GlobalMaximumCandidate));
 
-  bytes +=
-      threadsPerBlock *
-      sizeof(PeakFinders::GlobalMaximumCandidate);
+  bytes += threadsPerBlock * sizeof(PeakFinders::GlobalMaximumCandidate);
 
   return bytes;
 }

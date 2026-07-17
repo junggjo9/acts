@@ -1,7 +1,6 @@
 find_package(CUDAToolkit REQUIRED)
 
-set(
-    unittest_extra_libraries
+set(unittest_extra_libraries
     Acts::ExamplesCudaMuonSegmentFitting
     Acts::ExamplesFramework
     Acts::ExamplesIoRoot

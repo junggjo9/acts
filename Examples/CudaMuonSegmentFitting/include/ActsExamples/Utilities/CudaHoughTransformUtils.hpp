@@ -13,8 +13,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <vector>
 #include <utility>
+#include <vector>
 
 #include <cuda_runtime.h>
 
@@ -35,11 +35,12 @@ using HoughAxisRanges = Acts::HoughTransformUtils::HoughAxisRanges;
 using LayerMask = unsigned long long;
 
 /// @brief Non-owning device-side event-level batch of Hough planes.
-/// 
+///
 /// All arrays are flat 1D arrays. Buckets are stored one after another, and
 /// inside each bucket x changes fastest, then y:
 ///
-///   [ b0(y0,x0) b0(y0,x1) ... b0(y1,x0) b0(y1,x1) ... | b1(y0,x0) b1(y0,x1) ... | b2(y0,x0) ... ]
+///   [ b0(y0,x0) b0(y0,x1) ... b0(y1,x0) b0(y1,x1) ... | b1(y0,x0) b1(y0,x1)
+///   ... | b2(y0,x0) ... ]
 ///
 /// Access:
 ///   globalBin = bucket * nBinsX * nBinsY + yBin * nBinsX + xBin
@@ -57,11 +58,11 @@ struct CudaHoughPlaneBatchArrays {
   CoordType* yMin = nullptr;
   CoordType* yMax = nullptr;
 
-  // This is keept as X, Y to be complient with original HoughTransformUtils
+  // This is kept as X, Y to be compliant with original HoughTransformUtils
   // and to later support generalization of this algorithm to also support phi
-  std::uint32_t nBuckets = 0; 
-  std::uint32_t nBinsX = 0; // nBinsX is in our case tanTheta
-  std::uint32_t nBinsY = 0; // nBinsY is y intercept
+  std::uint32_t nBuckets = 0;
+  std::uint32_t nBinsX = 0;  // nBinsX is in our case tanTheta
+  std::uint32_t nBinsY = 0;  // nBinsY is y intercept
 };
 
 /// @brief Event-level CUDA Hough accumulator batch.
@@ -112,13 +113,13 @@ class CudaHoughPlaneBatch {
   /// @brief Reverse mapping from global batch bin to {xBin, yBin}.
   std::pair<std::size_t, std::size_t> axisBins(size_type globalBin) const;
 
-  // Usefull utilities for testing
+  // Useful utilities for testing
   YieldType nHits(size_type bucket, size_type xBin, size_type yBin) const;
   YieldType nLayers(size_type bucket, size_type xBin, size_type yBin) const;
   LayerMask layerMask(size_type bucket, size_type xBin, size_type yBin) const;
   bool hasLayer(size_type bucket, size_type xBin, size_type yBin,
                 unsigned layer) const;
-  // Usefull for testing and in case of translation to original container type
+  // Useful for testing and in case of translation to original container type
   std::vector<unsigned> layers(size_type bucket, size_type xBin,
                                size_type yBin) const;
   YieldType maxHits(size_type bucket) const;
@@ -140,9 +141,10 @@ class CudaHoughPlaneBatch {
   CoordType yMin(size_type bucket) const;
   CoordType yMax(size_type bucket) const;
 
-  HoughAxisRanges bucketAxisRanges(size_type bucket, const HoughAxisRanges& baseRanges) const;
+  HoughAxisRanges bucketAxisRanges(size_type bucket,
+                                   const HoughAxisRanges& baseRanges) const;
 
-private:
+ private:
   HoughPlaneConfig m_cfg{};
   size_type m_nBuckets = 0;
 
