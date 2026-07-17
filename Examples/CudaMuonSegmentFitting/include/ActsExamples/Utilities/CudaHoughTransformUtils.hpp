@@ -9,13 +9,14 @@
 #pragma once
 
 #include "Acts/Seeding/HoughTransformUtils.hpp"
-#include "ActsExamples/EventData/CudaMuonSpacePoint.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 #include <utility>
+
+#include <cuda_runtime.h>
 
 namespace ActsExamples::CudaHoughTransformUtils {
 
@@ -104,28 +105,12 @@ class CudaHoughPlaneBatch {
   ///   globalBin = bucket * nCellsPerBucket + yBin * nBinsX + xBin
   size_type globalBin(size_type bucket, size_type xBin, size_type yBin) const;
 
-  /// @brief Reverse mapping from global batch bin to {xBin, yBin}.
-  std::pair<std::size_t, std::size_t> axisBins(size_type globalBin) const;
-
   /// CPU-side direct bin fill. Useful for vdalidation.
   void fillBin(size_type bucket, size_type xBin, size_type yBin, unsigned layer,
                YieldType weight = 1.0f);
 
-  /// CPU reference fill for MDT eta Hough, all buckets in the event.
-  void fillEtaDriftCirclesHost(const CudaMuonSpacePointContainer& spacePoints,
-                               const HoughAxisRanges& axisRanges,
-                               YieldType weight = 1.0f);
-
-  /// @brief CUDA fill for MDT eta drift-circle Hough accumulators.
-  /// Processes all buckets in the event. Each CUDA block processes one or more
-  /// buckets using a grid-stride loop over buckets. Within a bucket, threads
-  /// process hit x tanTheta-bin x left/right drift-circle solution tasks.
-  void fillEtaDriftCirclesOnDevice(
-      CudaMuonSpacePointContainer& spacePoints,
-      const HoughAxisRanges& axisRanges,
-      YieldType weight = 1.0f,
-      std::uint32_t threadsPerBlock = 128,
-      std::uint32_t num_blocks = 0);  // 0 is auto use number of SMs
+  /// @brief Reverse mapping from global batch bin to {xBin, yBin}.
+  std::pair<std::size_t, std::size_t> axisBins(size_type globalBin) const;
 
   // Usefull utilities for testing
   YieldType nHits(size_type bucket, size_type xBin, size_type yBin) const;
@@ -179,8 +164,6 @@ private:
   void checkBucket(size_type bucket) const;
   void checkIndices(size_type xBin, size_type yBin) const;
   void checkGlobalBin(size_type globalBin) const;
-  void checkSpacePointBuckets(
-      const CudaMuonSpacePointContainer& spacePoints) const;
 };
 
 }  // namespace ActsExamples::CudaHoughTransformUtils

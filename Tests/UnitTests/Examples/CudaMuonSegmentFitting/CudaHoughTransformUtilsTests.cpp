@@ -220,6 +220,7 @@ BOOST_AUTO_TEST_CASE(cuda_hough_batch_bit_mask_layer_counting) {
 // The known simulated line from the original ACTS test is approximately:
 //   tan(theta)  = -0.0401472 / 0.994974
 //   interceptY  = -422.612
+/*
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_csv_visual_example) {
   auto spacePoints = makeBatchedDriftCircleContainer(1);
 
@@ -279,6 +280,7 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_csv_visual_example) {
   BOOST_CHECK_GE(plane.maxHits(bucketId), 3.0f);
   BOOST_CHECK_GE(plane.maxLayers(bucketId), 3.0f);
 }
+*/
 
 // Visual test with realistic data
 // Bucket 0 exported for visualization

@@ -1,4 +1,4 @@
-if(NOT CMAKE_CUDA_COMPILER)
+if(NOT CMAKE_CUDA_COMPILER_LOADED)
     enable_cuda()
 endif()
 
@@ -8,6 +8,7 @@ acts_add_library(
     ExamplesCudaMuonSegmentFitting
     src/CudaMuonSpacePoint.cpp
     src/CudaHoughTransformUtils.cu
+    src/EtaHoughTransform.cu
     ACTS_INCLUDE_FOLDER include/ActsExamples
 )
 
