@@ -20,7 +20,7 @@ namespace ActsExamples::CudaHoughTransformUtils::EtaHoughTransform {
 
 namespace detail {
 
-void fillEtaDriftCirclesOnDeviceImpl(
+void etaHoughTransformImpl(
     CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
     CudaHoughMaximumBatchArrays maxima, const HoughAxisRanges& axisRanges,
     YieldType weight, std::uint32_t threadsPerBlock, std::uint32_t numBlocks);
@@ -32,22 +32,17 @@ void fillEtaDriftCirclesOnDeviceImpl(
 /// The returned maximum batch remains allocated on the device. Call
 /// moveToHost() when CPU access is required, but hit association has still to
 /// be done.
-template <std::size_t MaximaPerBucket = 5u>
-CudaHoughMaximumBatch<MaximaPerBucket> fillEtaDriftCirclesOnDevice(
+template <std::size_t MaximaPerBucket = 1u>
+CudaHoughMaximumBatch<MaximaPerBucket> etaHoughTransform(
     CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
     const HoughAxisRanges& axisRanges, YieldType weight = YieldType{1.0},
     std::uint32_t threadsPerBlock = 128u, std::uint32_t numBlocks = 0u) {
-  if (plane.nBuckets() != spacePoints.bucketCount()) {
-    throw std::invalid_argument(
-        "Eta Hough plane and space-point container must have the same bucket "
-        "count");
-  }
 
   CudaHoughMaximumBatch<MaximaPerBucket> maxima{plane.nBuckets()};
 
   maxima.moveToDevice();
 
-  detail::fillEtaDriftCirclesOnDeviceImpl(plane, spacePoints,
+  detail::etaHoughTransformImpl(plane, spacePoints,
                                           maxima.deviceArrays(), axisRanges,
                                           weight, threadsPerBlock, numBlocks);
 

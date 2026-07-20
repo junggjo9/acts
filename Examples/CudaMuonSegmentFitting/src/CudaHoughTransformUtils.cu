@@ -24,54 +24,13 @@
 
 namespace {
 
-using ActsExamples::CudaMuonSpacePointArrays;
-using ActsExamples::detLayer;
+using namespace ActsExamples;
 using ActsExamples::CudaHoughTransformUtils::CoordType;
 using ActsExamples::CudaHoughTransformUtils::CudaHoughPlaneBatchArrays;
 using ActsExamples::CudaHoughTransformUtils::HoughAxisRanges;
 using ActsExamples::CudaHoughTransformUtils::LayerMask;
 using ActsExamples::CudaHoughTransformUtils::YieldType;
 using ActsExamples::CudaHoughTransformUtils::detail::layerBit;
-
-template <typename T>
-void allocateDeviceColumn(T*& deviceColumn, std::size_t size) {
-  if (size == 0) {
-    return;
-  }
-
-  ACTS_CUDA_CHECK(
-      cudaMalloc(reinterpret_cast<void**>(&deviceColumn), size * sizeof(T)));
-}
-
-template <typename T>
-void freeDeviceColumn(T*& deviceColumn) noexcept {
-  if (deviceColumn != nullptr) {
-    cudaFree(deviceColumn);
-    deviceColumn = nullptr;
-  }
-}
-
-template <typename T>
-void copyColumnToDevice(T* deviceColumn, const std::vector<T>& hostColumn) {
-  if (hostColumn.empty()) {
-    return;
-  }
-
-  ACTS_CUDA_CHECK(cudaMemcpy(deviceColumn, hostColumn.data(),
-                             hostColumn.size() * sizeof(T),
-                             cudaMemcpyHostToDevice));
-}
-
-template <typename T>
-void copyColumnToHost(std::vector<T>& hostColumn, const T* deviceColumn) {
-  if (hostColumn.empty() || deviceColumn == nullptr) {
-    return;
-  }
-
-  ACTS_CUDA_CHECK(cudaMemcpy(hostColumn.data(), deviceColumn,
-                             hostColumn.size() * sizeof(T),
-                             cudaMemcpyDeviceToHost));
-}
 
 void allocateDeviceData(CudaHoughPlaneBatchArrays& device,
                         std::size_t totalCells, std::size_t nBuckets) {

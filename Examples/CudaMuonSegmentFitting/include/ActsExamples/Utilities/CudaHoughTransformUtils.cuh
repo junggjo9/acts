@@ -20,12 +20,15 @@
 
 namespace ActsExamples::CudaHoughTransformUtils::detail {
 
+/// Round the value upward to nearest aligment multiply for sharedByte number
+/// @param value: number to be rounded
+/// @param alignment: value of which multiple to align
 constexpr std::size_t alignUp(std::size_t value,
                               std::size_t alignment) noexcept {
   return ((value + alignment - 1u) / alignment) * alignment;
 }
 
-/// Convert layer index into bit mask
+/// Convert layer index into bit mask representation
 __device__ __host__ inline LayerMask layerBit(unsigned layer) {
   if (layer >= 8u * sizeof(LayerMask)) {
     return LayerMask{0ull};
@@ -70,6 +73,14 @@ __device__ inline int binIndexDevice(double min, double max, unsigned nSteps,
 }
 
 /// @brief Fill one bin in shared memory
+/// @param sharedHits: pointer to shared mem with num of hits
+/// @param sharedLayers: pointer to shared mem with num of layers
+/// @param sharedLayerMask: pointer to shared mem with LayerMask
+/// @param nBinsX: number of bins in X
+/// @param xBin: x bin
+/// @param yBin: y bin
+/// @param layer: Layer number of hit
+/// @param weight: Weight of one hit, normaly 1
 __device__ inline void fillSharedBin(YieldType* sharedHits,
                                      YieldType* sharedLayers,
                                      LayerMask* sharedLayerMask,
@@ -80,14 +91,18 @@ __device__ inline void fillSharedBin(YieldType* sharedHits,
 
   atomicAdd(&sharedHits[localBin], weight);
 
+  // Get layer as bit mask
   const LayerMask bit = layerBit(layer);
 
+  // Check for error
   if (bit == LayerMask{0ull}) {
     return;
   }
 
+  // atomicOr retrns oldMask and applies layer bit to bitMask
   const LayerMask oldMask = atomicOr(&sharedLayerMask[localBin], bit);
 
+  // If bit was not in mask, add 1 (weight) to number of layers
   if (notInMask(oldMask, bit)) {
     atomicAdd(&sharedLayers[localBin], weight);
   }
@@ -105,6 +120,7 @@ __device__ inline void fillSharedYBand(
   int yBinUp = binIndexDevice(ranges.yMin, ranges.yMax, plane.nBinsY,
                               yCenter + yHalfWidth);
 
+  // Necessary checks
   if (yBinDown > yBinUp) {
     const int temporary = yBinDown;
     yBinDown = yBinUp;
@@ -130,12 +146,16 @@ __device__ inline void fillSharedYBand(
 
 namespace ActsExamples::CudaHoughTransformUtils::PeakFinders {
 
+// Struct for GlobalMaximum Algorithm
 struct GlobalMaximumCandidate {
   YieldType nHits = -std::numeric_limits<YieldType>::infinity();
 
   std::uint32_t localBin = std::numeric_limits<std::uint32_t>::max();
 };
 
+// @brief Check if better
+// @param candidate To compare
+// @param current Current best
 __device__ inline bool betterCandidate(const GlobalMaximumCandidate& candidate,
                                        const GlobalMaximumCandidate& current) {
   if (candidate.nHits > current.nHits) {
@@ -152,6 +172,8 @@ __device__ inline bool betterCandidate(const GlobalMaximumCandidate& candidate,
 __device__ inline GlobalMaximumCandidate findGlobalMaximum(
     const YieldType* sharedHits, std::uint32_t nCells,
     GlobalMaximumCandidate* sharedCandidates) {
+
+  // 1. Preprocess cells so there is one maximum per thread: 225->128
   GlobalMaximumCandidate localMaximum{};
 
   for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
@@ -163,9 +185,11 @@ __device__ inline GlobalMaximumCandidate findGlobalMaximum(
     }
   }
 
+  // 2. Each thread has one maximum
   sharedCandidates[threadIdx.x] = localMaximum;
   __syncthreads();
 
+  // 3. Shared-memory block reduction in general form
   // Works for both power-of-two and non-power-of-two block sizes.
   for (std::uint32_t active = blockDim.x; active > 1u;) {
     const std::uint32_t nextActive = (active + 1u) / 2u;
@@ -186,15 +210,20 @@ __device__ inline GlobalMaximumCandidate findGlobalMaximum(
   return sharedCandidates[0];
 }
 
+/// @brief Atomically reserve one maximum slot in global memory
+/// @note Avoids going over preallocated limit
 __device__ inline std::uint32_t reserveMaximumSlot(
     CudaHoughMaximumBatchArrays maxima, std::uint32_t bucket) {
   std::uint32_t* counter = &maxima.nMaxima[bucket];
 
+  // Just atomic read value of counter
   std::uint32_t current = atomicCAS(counter, 0u, 0u);
 
   while (current < maxima.capacityPerBucket) {
+    // Attempt to reserve
     const std::uint32_t observed = atomicCAS(counter, current, current + 1u);
 
+    // If counter was equal current it is reserved
     if (observed == current) {
       return current;
     }
@@ -205,6 +234,18 @@ __device__ inline std::uint32_t reserveMaximumSlot(
   return maxima.capacityPerBucket;
 }
 
+/// @brief If possible, add Eta maximum to HoughMaximum batch
+/// @param maxima: ptr to preallocated SoA of maximums
+/// @param plane: ptr to global SoA of plane
+/// @param ranges: range of bucket
+/// @param sharedLayers: ptr to shared mem of Layers
+/// @param sharedLayers: ptr to shared mem of Layers bit Mask
+/// @param bucket: bucket idx
+/// @param candidate: Hough Maximum object to append
+///
+/// @note Operation can fail (return false) if bucket has no more 
+/// places for maximums -> number of maximums per bucket is 
+/// prealocated before the operation
 __device__ inline bool appendEtaMaximum(
     CudaHoughMaximumBatchArrays maxima, const CudaHoughPlaneBatchArrays plane,
     const HoughAxisRanges ranges, const YieldType* sharedLayers,
@@ -248,6 +289,8 @@ __device__ inline bool appendEtaMaximum(
 
 namespace ActsExamples::CudaHoughTransformUtils::detail {
 
+/// @brief Helper to get required number of shared Bytes
+/// for whoel Eta operation
 inline std::size_t sharedBytesForEtaHough(std::size_t nCells,
                                           std::size_t threadsPerBlock) {
   std::size_t bytes = 2u * nCells * sizeof(YieldType);

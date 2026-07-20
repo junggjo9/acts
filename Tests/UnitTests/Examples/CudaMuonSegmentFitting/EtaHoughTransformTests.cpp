@@ -104,24 +104,6 @@ ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
 }
 
 // Utility to save data to CSV  for python visualization
-void writeDriftCircleCsv(const std::filesystem::path& path) {
-  const std::vector<DriftCircleInput> driftCircles = driftCircleInputs();
-
-  std::ofstream out{path};
-  BOOST_REQUIRE_MESSAGE(out, "Failed to open " << path.string());
-
-  out << std::setprecision(17);
-  out << "hitIndex,x,y,z,r,uncert,layer\n";
-
-  for (std::size_t i = 0; i < driftCircles.size(); ++i) {
-    const auto& dc = driftCircles[i];
-
-    out << i << "," << 0.0 << "," << dc.y << "," << dc.z << "," << dc.r << ","
-        << dc.uncert << "," << i << "\n";
-  }
-}
-
-// Utility to save data to CSV  for python visualization
 void writeHoughHistogramCsv(
     const std::filesystem::path& path, const CudaHT::CudaHoughPlaneBatch& plane,
     const Acts::HoughTransformUtils::HoughAxisRanges& axisRanges) {
@@ -206,7 +188,7 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
 
   // The current global-maximum finder writes one maximum per bucket. The
   // container still reserves 5 slots per bucket for future peak finders.
-  auto maxima = CudaHT::EtaHoughTransform::fillEtaDriftCirclesOnDevice<5>(
+  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<1>(
       plane, spacePoints, axisRanges);
 
   // Both objects remain device-backed after the transform.

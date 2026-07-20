@@ -117,6 +117,7 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
     CoordType widthScale, CoordType maxWidth, YieldType weight) {
   const std::uint32_t nCells = plane.nBinsX * plane.nBinsY;
 
+  // 1. Allocate the shared mem
   extern __shared__ unsigned char sharedMemory[];
 
   auto* sharedHits = reinterpret_cast<YieldType*>(sharedMemory);
@@ -137,11 +138,14 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
       reinterpret_cast<PeakFinders::GlobalMaximumCandidate*>(sharedMemory +
                                                              candidateOffset);
 
+  // 2. Start grid stride loop over buckets
   for (std::uint32_t bucket = blockIdx.x; bucket < plane.nBuckets;
        bucket += gridDim.x) {
+    // 2.1 Each bucket has own ranges
     const HoughAxisRanges ranges{baseRanges.xMin, baseRanges.xMax,
                                  plane.yMin[bucket], plane.yMax[bucket]};
 
+    // 2.2 Prepare shared memory
     for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
          localBin += blockDim.x) {
       sharedHits[localBin] = YieldType{0.0};
@@ -151,6 +155,7 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
     __syncthreads();
 
+    // 2.3 Definitions for local ranges
     const std::uint32_t bucketStart = spacePoints.bucketStart[bucket];
 
     const std::uint32_t bucketEnd = spacePoints.bucketEnd[bucket];
@@ -161,7 +166,9 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
     const std::uint32_t nTasks = nHits * plane.nBinsX * nSolutions;
 
+    // 2.4 Start thread stride loop
     for (std::uint32_t task = threadIdx.x; task < nTasks; task += blockDim.x) {
+      // 2.5.1 Calculate the varaibles
       const std::uint32_t solution = task % nSolutions;
 
       const std::uint32_t xBin = (task / nSolutions) % plane.nBinsX;
@@ -197,6 +204,7 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
       const unsigned layer = detLayer(spacePoints.muonId[hitIndex]);
 
+      // 2.5.2 Fill the band
       HoughDetail::fillSharedYBand(sharedHits, sharedLayers, sharedLayerMask,
                                    plane, ranges, xBin, intercept, width, layer,
                                    weight);
@@ -204,9 +212,11 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
     __syncthreads();
 
+    // 2.6 Find global Maximum
     const PeakFinders::GlobalMaximumCandidate peak =
         PeakFinders::findGlobalMaximum(sharedHits, nCells, sharedCandidates);
 
+    // 2.7 Append maximum to list of maximums of bucket
     if (threadIdx.x == 0u) {
       PeakFinders::appendEtaMaximum(maxima, plane, ranges, sharedLayers,
                                     sharedLayerMask, bucket, peak);
@@ -214,7 +224,8 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
     __syncthreads();
 
-    // Keep the full Hough plane
+    // 2.8 Save the full Hough plane into global memory 
+    // Can be later omitted
     const std::uint32_t globalBase = bucket * nCells;
 
     for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
@@ -234,23 +245,12 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
 namespace ActsExamples::CudaHoughTransformUtils::EtaHoughTransform::detail {
 
-void fillEtaDriftCirclesOnDeviceImpl(
+void etaHoughTransformImpl(
     CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
     CudaHoughMaximumBatchArrays maxima, const HoughAxisRanges& axisRanges,
     YieldType weight, std::uint32_t threadsPerBlock, std::uint32_t numBlocks) {
   if (threadsPerBlock == 0u) {
     throw std::invalid_argument("threadsPerBlock must be non-zero");
-  }
-
-  if (plane.nBuckets() != spacePoints.bucketCount()) {
-    throw std::invalid_argument(
-        "Eta Hough plane and space-point container must have the same bucket "
-        "count");
-  }
-
-  if (maxima.nBuckets != plane.nBuckets()) {
-    throw std::invalid_argument(
-        "Eta Hough plane and maximum batch must have the same bucket count");
   }
 
   if (maxima.capacityPerBucket == 0u || maxima.nMaxima == nullptr) {
