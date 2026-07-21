@@ -66,8 +66,8 @@ std::vector<DriftCircleInput> driftCircleInputs() {
 }
 
 ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
-    std::size_t nBuckets) {
-  const std::vector<DriftCircleInput> driftCircles = driftCircleInputs();
+    std::size_t nBuckets,
+    const std::vector<DriftCircleInput>& driftCircles) {
   const std::size_t hitsPerBucket = driftCircles.size();
 
   ActsExamples::CudaMuonSpacePointContainer container{nBuckets * hitsPerBucket};
@@ -87,7 +87,8 @@ ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
 
       container.defineCoordinates(
           index, Acts::Vector3{0.0, dc.y + bucketYOffset, dc.z},
-          Acts::Vector3{1.0, 0.0, 0.0}, Acts::Vector3{0.0, 1.0, 0.0});
+          Acts::Vector3{1.0, 0.0, 0.0},
+          Acts::Vector3{0.0, 1.0, 0.0});
 
       container.setRadius(index, dc.r);
       container.setTime(index, 0.0);
@@ -101,6 +102,11 @@ ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
   }
 
   return container;
+}
+
+ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
+    std::size_t nBuckets) {
+  return makeBatchedDriftCircleContainer(nBuckets, driftCircleInputs());
 }
 
 // Utility to save data to CSV  for python visualization
@@ -186,8 +192,6 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
 
   CudaHT::CudaHoughPlaneBatch plane{{25, 15}, 1};
 
-  // The current global-maximum finder writes one maximum per bucket. The
-  // container still reserves 5 slots per bucket for future peak finders.
   auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<1>(
       plane, spacePoints, axisRanges);
 
@@ -260,6 +264,81 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
 
   BOOST_TEST_MESSAGE(
       "Wrote Hough visual debug histogram to: " << histogramCsv.string());
+}
+
+BOOST_AUTO_TEST_CASE(cuda_hough_eta_associates_all_line_hits) {
+  auto spacePoints = makeBatchedDriftCircleContainer(1);
+
+  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
+      -0.5, 0.5, -100.0 * Acts::UnitConstants::m,
+      100.0 * Acts::UnitConstants::m};
+
+  CudaHT::CudaHoughPlaneBatch plane{{10, 15}, 1};
+
+  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<1>(
+      plane, spacePoints, axisRanges);
+
+  maxima.copyAssociatedHitIndicesToHost();
+
+  BOOST_REQUIRE_EQUAL(maxima.nMaxima(0u), 1u);
+  BOOST_REQUIRE_EQUAL(maxima.nAssociatedHits(0u, 0u), 6u);
+  BOOST_CHECK_EQUAL(maxima.totalAssociatedHits(), 6u);
+
+  const auto associatedSpan = maxima.associatedHitIndices(0u, 0u);
+
+  std::vector<std::uint32_t> associatedHits{
+      associatedSpan.begin(), associatedSpan.end()};
+
+  std::sort(associatedHits.begin(), associatedHits.end());
+
+  const std::vector<std::uint32_t> expectedHits{
+      0u, 1u, 2u, 3u, 4u, 5u};
+
+  BOOST_CHECK_EQUAL_COLLECTIONS(
+      associatedHits.begin(), associatedHits.end(),
+      expectedHits.begin(), expectedHits.end());
+}
+
+BOOST_AUTO_TEST_CASE(cuda_hough_eta_rejects_non_line_hits) {
+  std::vector<DriftCircleInput> inputs = driftCircleInputs();
+
+  constexpr double uncert = 0.3;
+
+  // These hits remain reasonably close to the original chamber region, but
+  // neither drift-circle solution intersects the selected maximum cell.
+  inputs.push_back({-440.0, 0.0, 1.0, uncert});
+  inputs.push_back({-415.0, 0.0, 1.0, uncert});
+
+  auto spacePoints = makeBatchedDriftCircleContainer(1, inputs);
+
+  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
+      -0.5, 0.5, -100.0 * Acts::UnitConstants::m,
+      100.0 * Acts::UnitConstants::m};
+
+  CudaHT::CudaHoughPlaneBatch plane{{10, 15}, 1};
+
+  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<1>(
+      plane, spacePoints, axisRanges);
+
+  maxima.copyAssociatedHitIndicesToHost();
+
+  BOOST_REQUIRE_EQUAL(maxima.nMaxima(0u), 1u);
+  BOOST_REQUIRE_EQUAL(maxima.nAssociatedHits(0u, 0u), 6u);
+  BOOST_CHECK_EQUAL(maxima.totalAssociatedHits(), 6u);
+
+  const auto associatedSpan = maxima.associatedHitIndices(0u, 0u);
+
+  std::vector<std::uint32_t> associatedHits{
+      associatedSpan.begin(), associatedSpan.end()};
+
+  std::sort(associatedHits.begin(), associatedHits.end());
+
+  const std::vector<std::uint32_t> expectedHits{
+      0u, 1u, 2u, 3u, 4u, 5u};
+
+  BOOST_CHECK_EQUAL_COLLECTIONS(
+      associatedHits.begin(), associatedHits.end(),
+      expectedHits.begin(), expectedHits.end());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

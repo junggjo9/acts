@@ -22,4 +22,10 @@ target_link_libraries(
     PUBLIC Acts::ExamplesFramework CUDA::cudart
 )
 
+target_compile_options(
+    ActsExamplesCudaMuonSegmentFitting
+    PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
+)
+
 acts_compile_headers(ExamplesCudaMuonSegmentFitting GLOB "include/**/*.hpp")

@@ -11,6 +11,7 @@
 #include "ActsExamples/EventData/CudaMuonHoughMaximum.hpp"
 #include "ActsExamples/EventData/CudaMuonSpacePoint.hpp"
 #include "ActsExamples/Utilities/CudaHoughTransformUtils.hpp"
+#include "ActsExamples/EventData/CudaMuonHoughMaximum.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -25,9 +26,15 @@ void etaHoughTransformImpl(
     CudaHoughMaximumBatchArrays maxima, const HoughAxisRanges& axisRanges,
     YieldType weight, std::uint32_t threadsPerBlock, std::uint32_t numBlocks);
 
+void fillEtaHitAssociationsImpl(
+    CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
+    CudaHoughMaximumBatchArrays maxima, const HoughAxisRanges& axisRanges,
+    std::uint32_t threadsPerBlock);
+
 }  // namespace detail
 
-/// Fill the eta Hough planes and find one global maximum in each bucket.
+/// Fill the Eta Hough planes, find one global maximum in each bucket and
+/// associate the contributing input space points with every maximum.
 ///
 /// The returned maximum batch remains allocated on the device. Call
 /// moveToHost() when CPU access is required, but hit association has still to
@@ -39,12 +46,21 @@ CudaHoughMaximumBatch<MaximaPerBucket> etaHoughTransform(
     std::uint32_t threadsPerBlock = 128u, std::uint32_t numBlocks = 0u) {
 
   CudaHoughMaximumBatch<MaximaPerBucket> maxima{plane.nBuckets()};
-
   maxima.moveToDevice();
 
-  detail::etaHoughTransformImpl(plane, spacePoints,
-                                          maxima.deviceArrays(), axisRanges,
-                                          weight, threadsPerBlock, numBlocks);
+  // 1. Fill the Hough planes, find maxima and count their associated hits.
+  detail::etaHoughTransformImpl(plane, spacePoints, maxima.deviceArrays(),
+                                axisRanges, weight, threadsPerBlock, numBlocks);
+
+  // 2. Copy only nMaxima and nAssociatedHits to the CPU.
+  maxima.copyAssociationMetadataToHost();
+
+  // 3. Calculate CSR offsets and allocate the exact index storage.
+  maxima.allocateAssociationStorage();
+
+  // 4. Fill the newly allocated index array.
+  detail::fillEtaHitAssociationsImpl(
+      plane, spacePoints, maxima.deviceArrays(), axisRanges, threadsPerBlock);
 
   return maxima;
 }

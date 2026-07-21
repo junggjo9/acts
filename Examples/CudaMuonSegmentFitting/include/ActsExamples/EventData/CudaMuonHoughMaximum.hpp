@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <limits>
 #include <vector>
+#include <span>
 
 #include <cuda_runtime.h>
 
@@ -43,13 +44,38 @@ struct CudaHoughMaximumBatchArrays {
   /// Number of occupied maximum slots in each bucket.
   std::uint32_t* nMaxima = nullptr;
 
+  // Numbere of input space points associated with maximum
+  std::uint32_t* nAssociatedHits = nullptr;
+
+  // Offsets into into associatedHitIndices
+  std::uint32_t* associatedHitOffsets = nullptr;
+
+  // Flat list of indicies to CudaMuonSpacePointContainer
+  std::uint32_t* associatedHitIndices = nullptr;
+
   std::uint32_t nBuckets = 0;
   std::uint32_t capacityPerBucket = 0;
+  // Full size of associated hit list
+  std::uint32_t totalAssociatedHits = 0;
 
   /// Return the flat array index for a bucket and maximum slot.
   __host__ __device__ std::uint32_t index(
       std::uint32_t bucket, std::uint32_t maximum) const noexcept {
     return bucket * capacityPerBucket + maximum;
+  }
+
+  /// Return the beginning of the associated-hit range for a maximum.
+  __host__ __device__ std::uint32_t associatedHitBegin(
+      std::uint32_t bucket,
+      std::uint32_t maximum) const noexcept {
+    return associatedHitOffsets[index(bucket, maximum)];
+  }
+
+  /// Return the end of the associated-hit range for a maximum.
+  __host__ __device__ std::uint32_t associatedHitEnd(
+      std::uint32_t bucket,
+      std::uint32_t maximum) const noexcept {
+    return associatedHitOffsets[index(bucket, maximum) + 1u];
   }
 };
 
@@ -107,6 +133,39 @@ class CudaHoughMaximumBatch {
   size_type xBin(size_type bucket, size_type maximum) const;
   size_type yBin(size_type bucket, size_type maximum) const;
 
+  /// Copy only the metadata required to allocate hit-association storage.
+  ///
+  /// Copies nMaxima and nAssociatedHits from the device.
+  void copyAssociationMetadataToHost();
+
+  /// Calculate CSR offsets from the copied association counts and allocate
+  /// exact associated-hit storage on the device.
+  void allocateAssociationStorage();
+
+  /// Copy the associated space-point indices from the device to the host.
+  ///
+  /// This is called after the association-fill kernel has completed.
+  void copyAssociatedHitIndicesToHost();
+
+  /// Return the number of associated input space points for one maximum.
+  size_type nAssociatedHits(
+      size_type bucket,
+      size_type maximum) const;
+
+  /// Return all original space-point indices associated with one maximum.
+  std::span<const std::uint32_t> associatedHitIndices(
+      size_type bucket,
+      size_type maximum) const;
+
+  /// Return the total exact size of associatedHitIndices.
+  size_type totalAssociatedHits() const noexcept {
+    return m_hostAssociatedHitIndices.size();
+  }
+
+  bool hasAssociationStorage() const noexcept {
+    return m_associationStorageAllocated;
+  }
+
   /// Allocate device storage and copy host data to it.
   void moveToDevice();
 
@@ -142,6 +201,24 @@ class CudaHoughMaximumBatch {
   /// One counter per bucket, not one counter per maximum slot.
   std::vector<std::uint32_t> m_hostNMaxima{};
 
+  /// One exact association count per maximum slot.
+  std::vector<std::uint32_t> m_hostNAssociatedHits{};
+
+  /// CSR offsets. Size is totalCapacity() + 1 after allocation.
+  std::vector<std::uint32_t> m_hostAssociatedHitOffsets{};
+
+  /// Exact flat associated-hit storage.
+  std::vector<std::uint32_t> m_hostAssociatedHitIndices{};
+
+  /// Whether nMaxima and nAssociatedHits have been copied from the device.
+  bool m_associationMetadataOnHost = false;
+
+  /// Whether exact device-side offsets and index storage have been allocated.
+  bool m_associationStorageAllocated = false;
+
+  /// Whether the final associated indices have been copied back to the host.
+  bool m_associatedHitIndicesOnHost = false;
+
   CudaHoughMaximumBatchArrays m_device{};
   bool m_onDevice = false;
 
@@ -151,6 +228,9 @@ class CudaHoughMaximumBatch {
 
   void checkBucket(size_type bucket) const;
   void checkMaximum(size_type bucket, size_type maximum) const;
+
+  /// Release only the variable-size association offset/index storage.
+  void clearAssociationStorage() noexcept;
 };
 
 }  // namespace ActsExamples

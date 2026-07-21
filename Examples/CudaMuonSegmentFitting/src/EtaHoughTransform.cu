@@ -31,6 +31,9 @@ using ActsExamples::CudaHoughTransformUtils::HoughAxisRanges;
 using ActsExamples::CudaHoughTransformUtils::LayerMask;
 using ActsExamples::CudaHoughTransformUtils::YieldType;
 
+constexpr CoordType etaWidthScale = 0.0;
+constexpr CoordType etaMaxWidth = 0.0;
+
 namespace HoughDetail = ActsExamples::CudaHoughTransformUtils::detail;
 
 namespace PeakFinders = ActsExamples::CudaHoughTransformUtils::PeakFinders;
@@ -41,6 +44,78 @@ __device__ inline CoordType minimum(CoordType first, CoordType second) {
 
 __device__ inline CoordType maximum(CoordType first, CoordType second) {
   return first > second ? first : second;
+}
+
+// Reverse of fillSharedYBand
+__device__ inline bool yBinInsideBand(
+    std::uint32_t selectedYBin, CoordType center, CoordType halfWidth,
+    const HoughAxisRanges& ranges, std::uint32_t nBinsY) {
+  int yBinDown = HoughDetail::binIndexDevice(
+      ranges.yMin, ranges.yMax, nBinsY, center - halfWidth);
+
+  int yBinUp = HoughDetail::binIndexDevice(
+      ranges.yMin, ranges.yMax, nBinsY, center + halfWidth);
+
+  if (yBinDown > yBinUp) {
+    const int temporary = yBinDown;
+    yBinDown = yBinUp;
+    yBinUp = temporary;
+  }
+
+  if (yBinDown < 0) {
+    yBinDown = 0;
+  }
+
+  if (yBinUp >= static_cast<int>(nBinsY)) {
+    yBinUp = static_cast<int>(nBinsY) - 1;
+  }
+
+  const int selected = static_cast<int>(selectedYBin);
+  return selected >= yBinDown && selected <= yBinUp;
+}
+
+__device__ inline bool etaHitContributesToMaximum(
+    CudaHoughPlaneBatchArrays plane, CudaMuonSpacePointArrays spacePoints,
+    CudaHoughMaximumBatchArrays maxima, HoughAxisRanges baseRanges,
+    CoordType widthScale, CoordType maxWidth, std::uint32_t bucket,
+    std::uint32_t maximum, std::uint32_t hitIndex) {
+  const std::uint32_t maximumIndex = maxima.index(bucket, maximum);
+
+  const std::uint32_t selectedXBin = maxima.xBin[maximumIndex];
+  const std::uint32_t selectedYBin = maxima.yBin[maximumIndex];
+
+  const HoughAxisRanges ranges{baseRanges.xMin, baseRanges.xMax,
+                               plane.yMin[bucket], plane.yMax[bucket]};
+
+  const CoordType tanTheta = HoughDetail::binCenterDevice(
+      ranges.xMin, ranges.xMax, plane.nBinsX, selectedXBin);
+
+  const CoordType y = spacePoints.localPositionY[hitIndex];
+  const CoordType z = spacePoints.localPositionZ[hitIndex];
+  const CoordType radius = spacePoints.driftRadius[hitIndex];
+
+  const CoordType covariance = spacePoints.covariance1[hitIndex] > 0.0
+                                   ? spacePoints.covariance1[hitIndex]
+                                   : CoordType{0.0};
+
+  CoordType width = sqrt(covariance) * widthScale;
+
+  if (width > maxWidth) {
+    width = maxWidth;
+  }
+
+  const CoordType centralIntercept = y - tanTheta * z;
+
+  const CoordType projectedRadius =
+      radius * sqrt(CoordType{1.0} + tanTheta * tanTheta);
+
+  const CoordType negativeIntercept = centralIntercept - projectedRadius;
+  const CoordType positiveIntercept = centralIntercept + projectedRadius;
+
+  return yBinInsideBand(selectedYBin, negativeIntercept, width, ranges,
+                        plane.nBinsY) ||
+         yBinInsideBand(selectedYBin, positiveIntercept, width, ranges,
+                        plane.nBinsY);
 }
 
 __global__ void computeEtaInterceptRangesMdtBatchKernel(
@@ -241,6 +316,123 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
   }
 }
 
+__global__ void countEtaMaximumHitsKernel(
+    CudaHoughPlaneBatchArrays plane, CudaMuonSpacePointArrays spacePoints,
+    CudaHoughMaximumBatchArrays maxima, HoughAxisRanges baseRanges,
+    CoordType widthScale, CoordType maxWidth) {
+  const std::uint32_t maximumIndex = blockIdx.x;
+  const std::uint32_t totalMaximumSlots =
+      maxima.nBuckets * maxima.capacityPerBucket;
+
+  if (maximumIndex >= totalMaximumSlots) {
+    return;
+  }
+
+  const std::uint32_t bucket =
+      maximumIndex / maxima.capacityPerBucket;
+
+  const std::uint32_t maximum =
+      maximumIndex % maxima.capacityPerBucket;
+
+  if (maximum >= maxima.nMaxima[bucket]) {
+    if (threadIdx.x == 0u) {
+      maxima.nAssociatedHits[maximumIndex] = 0u;
+    }
+    return;
+  }
+
+  __shared__ std::uint32_t sharedCount;
+
+  if (threadIdx.x == 0u) {
+    sharedCount = 0u;
+  }
+
+  __syncthreads();
+
+  const std::uint32_t bucketStart = spacePoints.bucketStart[bucket];
+  const std::uint32_t bucketEnd = spacePoints.bucketEnd[bucket];
+
+  std::uint32_t localCount = 0u;
+
+  for (std::uint32_t hitIndex = bucketStart + threadIdx.x;
+       hitIndex < bucketEnd; hitIndex += blockDim.x) {
+    if (etaHitContributesToMaximum(
+            plane, spacePoints, maxima, baseRanges, widthScale, maxWidth,
+            bucket, maximum, hitIndex)) {
+      ++localCount;
+    }
+  }
+
+  if (localCount != 0u) {
+    atomicAdd(&sharedCount, localCount);
+  }
+
+  __syncthreads();
+
+  if (threadIdx.x == 0u) {
+    maxima.nAssociatedHits[maximumIndex] = sharedCount;
+  }
+}
+
+__global__ void fillEtaMaximumHitIndicesKernel(
+    CudaHoughPlaneBatchArrays plane, CudaMuonSpacePointArrays spacePoints,
+    CudaHoughMaximumBatchArrays maxima, HoughAxisRanges baseRanges,
+    CoordType widthScale, CoordType maxWidth) {
+  const std::uint32_t maximumIndex = blockIdx.x;
+  const std::uint32_t totalMaximumSlots =
+      maxima.nBuckets * maxima.capacityPerBucket;
+
+  if (maximumIndex >= totalMaximumSlots) {
+    return;
+  }
+
+  const std::uint32_t bucket =
+      maximumIndex / maxima.capacityPerBucket;
+
+  const std::uint32_t maximum =
+      maximumIndex % maxima.capacityPerBucket;
+
+  if (maximum >= maxima.nMaxima[bucket]) {
+    return;
+  }
+
+  const std::uint32_t outputBegin =
+      maxima.associatedHitOffsets[maximumIndex];
+
+  const std::uint32_t outputEnd =
+      maxima.associatedHitOffsets[maximumIndex + 1u];
+
+  __shared__ std::uint32_t sharedWriteIndex;
+
+  if (threadIdx.x == 0u) {
+    sharedWriteIndex = 0u;
+  }
+
+  __syncthreads();
+
+  const std::uint32_t bucketStart = spacePoints.bucketStart[bucket];
+  const std::uint32_t bucketEnd = spacePoints.bucketEnd[bucket];
+
+  for (std::uint32_t hitIndex = bucketStart + threadIdx.x;
+       hitIndex < bucketEnd; hitIndex += blockDim.x) {
+    if (!etaHitContributesToMaximum(
+            plane, spacePoints, maxima, baseRanges, widthScale, maxWidth,
+            bucket, maximum, hitIndex)) {
+      continue;
+    }
+
+    const std::uint32_t localWriteIndex =
+        atomicAdd(&sharedWriteIndex, 1u);
+
+    const std::uint32_t outputIndex =
+        outputBegin + localWriteIndex;
+
+    if (outputIndex < outputEnd) {
+      maxima.associatedHitIndices[outputIndex] = hitIndex;
+    }
+  }
+}
+
 }  // namespace
 
 namespace ActsExamples::CudaHoughTransformUtils::EtaHoughTransform::detail {
@@ -248,12 +440,24 @@ namespace ActsExamples::CudaHoughTransformUtils::EtaHoughTransform::detail {
 void etaHoughTransformImpl(
     CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
     CudaHoughMaximumBatchArrays maxima, const HoughAxisRanges& axisRanges,
-    YieldType weight, std::uint32_t threadsPerBlock, std::uint32_t numBlocks) {
+    YieldType weight, std::uint32_t threadsPerBlock,
+    std::uint32_t numBlocks) {
   if (threadsPerBlock == 0u) {
     throw std::invalid_argument("threadsPerBlock must be non-zero");
   }
 
-  if (maxima.capacityPerBucket == 0u || maxima.nMaxima == nullptr) {
+  if (plane.nBuckets() != spacePoints.bucketCount()) {
+    throw std::invalid_argument(
+        "Eta Hough plane and space-point container must have the same bucket "
+        "count");
+  }
+
+  if (maxima.nBuckets != plane.nBuckets()) {
+    throw std::invalid_argument(
+        "Eta Hough plane and maximum batch must have the same bucket count");
+  }
+
+  if (maxima.capacityPerBucket == 0u || maxima.nMaxima == nullptr || maxima.nAssociatedHits == nullptr || maxima.xBin == nullptr || maxima.yBin == nullptr) {
     throw std::invalid_argument("Invalid Hough maximum device storage");
   }
 
@@ -265,8 +469,16 @@ void etaHoughTransformImpl(
     plane.moveToDevice();
   }
 
-  ACTS_CUDA_CHECK(
-      cudaMemset(maxima.nMaxima, 0, plane.nBuckets() * sizeof(std::uint32_t)));
+  ACTS_CUDA_CHECK(cudaMemset(
+      maxima.nMaxima, 0, plane.nBuckets() * sizeof(std::uint32_t)));
+
+  const std::size_t totalMaximumSlots =
+      static_cast<std::size_t>(maxima.nBuckets) *
+      maxima.capacityPerBucket;
+
+  ACTS_CUDA_CHECK(cudaMemset(
+      maxima.nAssociatedHits, 0,
+      totalMaximumSlots * sizeof(std::uint32_t)));
 
   int device = 0;
   ACTS_CUDA_CHECK(cudaGetDevice(&device));
@@ -283,8 +495,10 @@ void etaHoughTransformImpl(
   ACTS_CUDA_CHECK(cudaDeviceGetAttribute(
       &maximumThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, device));
 
-  if (threadsPerBlock > static_cast<std::uint32_t>(maximumThreadsPerBlock)) {
-    throw std::runtime_error("threadsPerBlock exceeds the CUDA device limit");
+  if (threadsPerBlock >
+      static_cast<std::uint32_t>(maximumThreadsPerBlock)) {
+    throw std::runtime_error(
+        "threadsPerBlock exceeds the CUDA device limit");
   }
 
   const std::size_t sharedBytes = HoughDetail::sharedBytesForEtaHough(
@@ -299,16 +513,15 @@ void etaHoughTransformImpl(
     numBlocks = static_cast<std::uint32_t>(multiprocessorCount);
   }
 
-  numBlocks = std::min(numBlocks, static_cast<std::uint32_t>(plane.nBuckets()));
+  numBlocks = std::min(
+      numBlocks, static_cast<std::uint32_t>(plane.nBuckets()));
 
   if (numBlocks == 0u) {
-    throw std::runtime_error("Resolved number of CUDA blocks is zero");
+    throw std::runtime_error(
+        "Resolved number of CUDA blocks is zero");
   }
 
   constexpr CoordType interceptMargin = 10.0 * Acts::UnitConstants::cm;
-
-  constexpr CoordType widthScale = 0.0;
-  constexpr CoordType maxWidth = 0.0;
 
   const std::size_t rangeSharedBytes =
       2u * static_cast<std::size_t>(threadsPerBlock) * sizeof(CoordType);
@@ -321,11 +534,79 @@ void etaHoughTransformImpl(
 
   ACTS_CUDA_CHECK(cudaGetLastError());
 
-  fillEtaDriftCirclesMdtBatchKernel<<<static_cast<unsigned>(numBlocks),
-                                      static_cast<unsigned>(threadsPerBlock),
-                                      sharedBytes>>>(
+  fillEtaDriftCirclesMdtBatchKernel<<<
+      static_cast<unsigned>(numBlocks),
+      static_cast<unsigned>(threadsPerBlock), sharedBytes>>>(
       plane.deviceArrays(), spacePoints.deviceArrays(), maxima, axisRanges,
-      widthScale, maxWidth, weight);
+      etaWidthScale, etaMaxWidth, weight);
+
+  ACTS_CUDA_CHECK(cudaGetLastError());
+
+  countEtaMaximumHitsKernel<<<
+      static_cast<unsigned>(totalMaximumSlots),
+      static_cast<unsigned>(threadsPerBlock)>>>(
+      plane.deviceArrays(), spacePoints.deviceArrays(), maxima, axisRanges,
+      etaWidthScale, etaMaxWidth);
+
+  ACTS_CUDA_CHECK(cudaGetLastError());
+  ACTS_CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void fillEtaHitAssociationsImpl(
+    CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
+    CudaHoughMaximumBatchArrays maxima, const HoughAxisRanges& axisRanges,
+    std::uint32_t threadsPerBlock) {
+  if (threadsPerBlock == 0u) {
+    throw std::invalid_argument("threadsPerBlock must be non-zero");
+  }
+
+  if (!plane.isOnDevice() || !spacePoints.isOnDevice()) {
+    throw std::logic_error(
+        "Eta Hough plane and space points must remain on the device");
+  }
+
+  if (maxima.nBuckets != plane.nBuckets()) {
+    throw std::invalid_argument(
+        "Eta Hough plane and maximum batch must have the same bucket count");
+  }
+
+  if (maxima.nMaxima == nullptr ||
+      maxima.associatedHitOffsets == nullptr) {
+    throw std::invalid_argument(
+        "Invalid Hough maximum association storage");
+  }
+
+  if (maxima.totalAssociatedHits == 0u) {
+    return;
+  }
+
+  if (maxima.associatedHitIndices == nullptr) {
+    throw std::invalid_argument(
+        "Associated-hit index storage is not allocated");
+  }
+
+  int device = 0;
+  ACTS_CUDA_CHECK(cudaGetDevice(&device));
+
+  int maximumThreadsPerBlock = 0;
+  ACTS_CUDA_CHECK(cudaDeviceGetAttribute(
+      &maximumThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, device));
+
+  if (threadsPerBlock >
+      static_cast<std::uint32_t>(maximumThreadsPerBlock)) {
+    throw std::runtime_error(
+        "threadsPerBlock exceeds the CUDA device limit");
+  }
+
+  const std::size_t totalMaximumSlots =
+      static_cast<std::size_t>(maxima.nBuckets) *
+      maxima.capacityPerBucket;
+
+  fillEtaMaximumHitIndicesKernel<<<
+      static_cast<unsigned>(totalMaximumSlots),
+      static_cast<unsigned>(threadsPerBlock)>>>(
+      plane.deviceArrays(), spacePoints.deviceArrays(), maxima, axisRanges,
+      etaWidthScale, etaMaxWidth);
 
   ACTS_CUDA_CHECK(cudaGetLastError());
   ACTS_CUDA_CHECK(cudaDeviceSynchronize());
