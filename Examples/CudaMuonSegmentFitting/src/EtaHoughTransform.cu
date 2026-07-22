@@ -10,6 +10,7 @@
 #include "ActsExamples/Algorithms/TrackFinding/EtaHoughTransform.hpp"
 #include "ActsExamples/Utilities/CudaHoughTransformUtils.cuh"
 #include "ActsExamples/Utilities/CudaUtilities.hpp"
+#include "ActsExamples/EventData/CudaMuonHoughMaximum.hpp"
 
 #include <algorithm>
 #include <cmath>
