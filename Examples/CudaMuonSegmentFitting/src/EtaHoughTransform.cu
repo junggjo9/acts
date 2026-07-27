@@ -32,8 +32,8 @@ using ActsExamples::CudaHoughTransformUtils::HoughAxisRanges;
 using ActsExamples::CudaHoughTransformUtils::LayerMask;
 using ActsExamples::CudaHoughTransformUtils::YieldType;
 
-constexpr CoordType etaWidthScale = 0.0;
-constexpr CoordType etaMaxWidth = 0.0;
+constexpr CoordType etaWidthScale = 1.0;
+constexpr CoordType etaMaxWidth = 1.0;
 
 namespace HoughDetail = ActsExamples::CudaHoughTransformUtils::detail;
 
