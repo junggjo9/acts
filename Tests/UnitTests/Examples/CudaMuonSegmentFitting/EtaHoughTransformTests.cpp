@@ -376,7 +376,7 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
       -3.0, 3.0, -100.0 * Acts::UnitConstants::m,
       100.0 * Acts::UnitConstants::m};
 
-  CudaHT::CudaHoughPlaneBatch plane{{25, 15}, 1};
+  CudaHT::CudaHoughPlaneBatch plane{{15, 15}, 1};
 
   auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<1>(
       plane, spacePoints, axisRanges);
@@ -460,10 +460,10 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
   }
 
   constexpr std::size_t nEvents = 5000;
-  constexpr std::uint32_t minimumSeedHits = 5;
+  constexpr std::uint32_t minimumSeedHits = 4;
   constexpr double minimumTanBeta = -3.0;
   constexpr double maximumTanBeta = 3.0;
-  constexpr double matchingToleranceBins = 2.5;
+  constexpr double matchingToleranceBins = 1.0;
 
   // Number of failed events for which the complete Hough plane and hits are saved.
   constexpr std::size_t numberErrorsToSave = 10;

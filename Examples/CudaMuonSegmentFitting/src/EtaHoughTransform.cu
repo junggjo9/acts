@@ -32,8 +32,35 @@ using ActsExamples::CudaHoughTransformUtils::HoughAxisRanges;
 using ActsExamples::CudaHoughTransformUtils::LayerMask;
 using ActsExamples::CudaHoughTransformUtils::YieldType;
 
-constexpr CoordType etaWidthScale = 1.0;
-constexpr CoordType etaMaxWidth = 1.0;
+constexpr CoordType etaWidthScale = 1.0; // mm
+constexpr CoordType etaMaxWidth = 1.0; // mm
+
+__device__ inline CoordType etaYHalfWidth(
+    const HoughAxisRanges& ranges, std::uint32_t nBinsX,
+    CoordType z, CoordType radius, CoordType covariance,
+    CoordType widthScale, CoordType maxMeasurementWidth) {
+  const CoordType tanBetaBinWidth =
+      (ranges.xMax - ranges.xMin) / static_cast<CoordType>(nBinsX);
+
+  const CoordType tanBetaHalfWidth =
+      CoordType{0.5} * tanBetaBinWidth;
+
+  // Width caused by representing a complete tanBeta bin by its centre.
+  const CoordType geometricWidth =
+      (fabs(z) + fabs(radius)) * tanBetaHalfWidth;
+
+  CoordType measurementWidth =
+      sqrt(covariance > CoordType{0.0} ? covariance : CoordType{0.0}) *
+      widthScale;
+
+  if (maxMeasurementWidth > CoordType{0.0} &&
+      measurementWidth > maxMeasurementWidth) {
+    measurementWidth = maxMeasurementWidth;
+  }
+
+  return geometricWidth + measurementWidth;
+}
+
 
 namespace HoughDetail = ActsExamples::CudaHoughTransformUtils::detail;
 
@@ -85,8 +112,9 @@ __device__ inline bool etaHitContributesToMaximum(
   const std::uint32_t selectedXBin = maxima.xBin[maximumIndex];
   const std::uint32_t selectedYBin = maxima.yBin[maximumIndex];
 
-  const HoughAxisRanges ranges{baseRanges.xMin, baseRanges.xMax,
-                               plane.yMin[bucket], plane.yMax[bucket]};
+  const HoughAxisRanges ranges{
+      baseRanges.xMin, baseRanges.xMax,
+      plane.yMin[bucket], plane.yMax[bucket]};
 
   const CoordType tanTheta = HoughDetail::binCenterDevice(
       ranges.xMin, ranges.xMax, plane.nBinsX, selectedXBin);
@@ -94,29 +122,29 @@ __device__ inline bool etaHitContributesToMaximum(
   const CoordType y = spacePoints.localPositionY[hitIndex];
   const CoordType z = spacePoints.localPositionZ[hitIndex];
   const CoordType radius = spacePoints.driftRadius[hitIndex];
+  const CoordType covariance = spacePoints.covariance1[hitIndex];
 
-  const CoordType covariance = spacePoints.covariance1[hitIndex] > 0.0
-                                   ? spacePoints.covariance1[hitIndex]
-                                   : CoordType{0.0};
-
-  CoordType width = sqrt(covariance) * widthScale;
-
-  if (width > maxWidth) {
-    width = maxWidth;
-  }
+  // Must use the same width definition as Hough filling.
+  const CoordType width = etaYHalfWidth(
+      ranges, plane.nBinsX, z, radius, covariance, widthScale, maxWidth);
 
   const CoordType centralIntercept = y - tanTheta * z;
 
   const CoordType projectedRadius =
       radius * sqrt(CoordType{1.0} + tanTheta * tanTheta);
 
-  const CoordType negativeIntercept = centralIntercept - projectedRadius;
-  const CoordType positiveIntercept = centralIntercept + projectedRadius;
+  const CoordType negativeIntercept =
+      centralIntercept - projectedRadius;
 
-  return yBinInsideBand(selectedYBin, negativeIntercept, width, ranges,
-                        plane.nBinsY) ||
-         yBinInsideBand(selectedYBin, positiveIntercept, width, ranges,
-                        plane.nBinsY);
+  const CoordType positiveIntercept =
+      centralIntercept + projectedRadius;
+
+  return yBinInsideBand(
+             selectedYBin, negativeIntercept, width,
+             ranges, plane.nBinsY) ||
+         yBinInsideBand(
+             selectedYBin, positiveIntercept, width,
+             ranges, plane.nBinsY);
 }
 
 __global__ void computeEtaInterceptRangesMdtBatchKernel(
@@ -268,17 +296,14 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
           y - tanTheta * z +
           sign * radius * sqrt(CoordType{1.0} + tanTheta * tanTheta);
 
-      const CoordType covariance = spacePoints.covariance1[hitIndex] > 0.0
-                                       ? spacePoints.covariance1[hitIndex]
-                                       : CoordType{0.0};
-
-      CoordType width = sqrt(covariance) * widthScale;
-
-      if (width > maxWidth) {
-        width = maxWidth;
-      }
+      const CoordType covariance = spacePoints.covariance1[hitIndex];
 
       const unsigned layer = detLayer(spacePoints.muonId[hitIndex]);
+
+
+      const CoordType width = etaYHalfWidth(
+                ranges, plane.nBinsX, z, radius, covariance,
+                widthScale, maxWidth);
 
       // 2.5.2 Fill the band
       HoughDetail::fillSharedYBand(sharedHits, sharedLayers, sharedLayerMask,
@@ -602,6 +627,7 @@ void fillEtaHitAssociationsImpl(
   const std::size_t totalMaximumSlots =
       static_cast<std::size_t>(maxima.nBuckets) *
       maxima.capacityPerBucket;
+
 
   fillEtaMaximumHitIndicesKernel<<<
       static_cast<unsigned>(totalMaximumSlots),
