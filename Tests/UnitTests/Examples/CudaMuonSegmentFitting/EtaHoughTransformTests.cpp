@@ -30,18 +30,15 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
-#include <vector>
-
 #include <memory>
 #include <string>
 #include <utility>
-
-
-#include <cuda_runtime.h>
+#include <vector>
 
 #include <TFile.h>
 #include <TH1D.h>
 #include <TTree.h>
+#include <cuda_runtime.h>
 
 #include "../../Core/Seeding/StrawHitGeneratorHelper.hpp"
 using namespace ActsTests;
@@ -59,9 +56,11 @@ struct EtaValidationBatch {
   std::vector<EtaValidationTruth> truth;
 };
 
-EtaValidationBatch makeGeneratedEtaValidationBatch(
-    std::size_t nEvents, RandomEngine& engine, const Acts::Logger& logger,
-    double minimumTanBeta, double maximumTanBeta) {
+EtaValidationBatch makeGeneratedEtaValidationBatch(std::size_t nEvents,
+                                                   RandomEngine& engine,
+                                                   const Acts::Logger& logger,
+                                                   double minimumTanBeta,
+                                                   double maximumTanBeta) {
   MeasurementGenerator::Config generatorConfig{};
   generatorConfig.createStraws = true;
   generatorConfig.smearRadius = true;
@@ -91,15 +90,14 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(
       continue;
     }
 
-    Container_t measurements = MeasurementGenerator::spawn(
-        line, 0.0, engine, generatorConfig, logger);
+    Container_t measurements =
+        MeasurementGenerator::spawn(line, 0.0, engine, generatorConfig, logger);
 
-    measurements.erase(
-        std::remove_if(measurements.begin(), measurements.end(),
-                       [](const auto& measurement) {
-                         return !measurement->isStraw();
-                       }),
-        measurements.end());
+    measurements.erase(std::remove_if(measurements.begin(), measurements.end(),
+                                      [](const auto& measurement) {
+                                        return !measurement->isStraw();
+                                      }),
+                       measurements.end());
 
     if (measurements.size() < 3u) {
       continue;
@@ -118,12 +116,10 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(
 
     // Intercept at z' = 0 after transforming z' = z - zReference.
     const double y0 =
-        line.position().y() +
-        tanBeta * (zReference - line.position().z());
+        line.position().y() + tanBeta * (zReference - line.position().z());
 
-    truth.push_back(
-        {tanBeta, y0, zReference,
-         static_cast<std::uint32_t>(measurements.size())});
+    truth.push_back({tanBeta, y0, zReference,
+                     static_cast<std::uint32_t>(measurements.size())});
 
     totalHits += measurements.size();
     eventMeasurements.push_back(std::move(measurements));
@@ -145,15 +141,15 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(
       spacePoints.setGeometryId(hitIndex, hitIndex);
       spacePoints.setId(hitIndex, 0u);
 
-      spacePoints.defineCoordinates(
-          hitIndex, position, measurement->sensorDirection(),
-          measurement->toNextSensor());
+      spacePoints.defineCoordinates(hitIndex, position,
+                                    measurement->sensorDirection(),
+                                    measurement->toNextSensor());
 
       spacePoints.setRadius(hitIndex, std::abs(measurement->driftRadius()));
       spacePoints.setTime(hitIndex, measurement->time());
 
-      spacePoints.setCovariance(
-          hitIndex, covariance[0], covariance[1], covariance[2]);
+      spacePoints.setCovariance(hitIndex, covariance[0], covariance[1],
+                                covariance[2]);
 
       spacePoints.setLogicalLayer(
           hitIndex, static_cast<std::uint32_t>(measurement->layer()));
@@ -166,13 +162,11 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(
 
   return {std::move(spacePoints), std::move(truth)};
 }
-};
+};  // namespace
 
 namespace ActsTests {
 
 namespace CudaHT = ActsExamples::CudaHoughTransformUtils;
-
-
 
 BOOST_AUTO_TEST_SUITE(CudaHoughTransformUtilsSuite)
 
@@ -199,8 +193,7 @@ std::vector<DriftCircleInput> driftCircleInputs() {
 }
 
 ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
-    std::size_t nBuckets,
-    const std::vector<DriftCircleInput>& driftCircles) {
+    std::size_t nBuckets, const std::vector<DriftCircleInput>& driftCircles) {
   const std::size_t hitsPerBucket = driftCircles.size();
 
   ActsExamples::CudaMuonSpacePointContainer container{nBuckets * hitsPerBucket};
@@ -220,8 +213,7 @@ ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
 
       container.defineCoordinates(
           index, Acts::Vector3{0.0, dc.y + bucketYOffset, dc.z},
-          Acts::Vector3{1.0, 0.0, 0.0},
-          Acts::Vector3{0.0, 1.0, 0.0});
+          Acts::Vector3{1.0, 0.0, 0.0}, Acts::Vector3{0.0, 1.0, 0.0});
 
       container.setRadius(index, dc.r);
       container.setTime(index, 0.0);
@@ -310,7 +302,8 @@ void writeFirstBucketHitsCsv(
 
 void writeHoughHistogramCsv(
     const std::filesystem::path& path, const CudaHT::CudaHoughPlaneBatch& plane,
-    std::size_t bucket, const Acts::HoughTransformUtils::HoughAxisRanges& ranges,
+    std::size_t bucket,
+    const Acts::HoughTransformUtils::HoughAxisRanges& ranges,
     double trueTanBeta, double trueY0, double recoTanBeta, double recoY0) {
   std::ofstream out{path};
   BOOST_REQUIRE_MESSAGE(out, "Failed to open " << path.string());
@@ -329,9 +322,10 @@ void writeHoughHistogramCsv(
       out << xBin << "," << yBin << "," << tanTheta << "," << interceptY << ","
           << plane.nHits(bucket, xBin, yBin) << ","
           << plane.nLayers(bucket, xBin, yBin) << ","
-          << static_cast<unsigned long long>(plane.layerMask(bucket, xBin, yBin))
-          << "," << trueTanBeta << "," << trueY0 << ","
-          << recoTanBeta << "," << recoY0 << "\n";
+          << static_cast<unsigned long long>(
+                 plane.layerMask(bucket, xBin, yBin))
+          << "," << trueTanBeta << "," << trueY0 << "," << recoTanBeta << ","
+          << recoY0 << "\n";
     }
   }
 }
@@ -355,9 +349,8 @@ void writeBucketHitsCsv(
     const std::array<double, 3>& cov = sp->covariance();
 
     out << i - start << "," << pos.x() << "," << pos.y() << "," << pos.z()
-        << "," << sp->driftRadius() << ","
-        << std::sqrt(std::max(cov[1], 0.0)) << ","
-        << rawMuonIdLayer(container.muonId(i)) << "\n";
+        << "," << sp->driftRadius() << "," << std::sqrt(std::max(cov[1], 0.0))
+        << "," << rawMuonIdLayer(container.muonId(i)) << "\n";
   }
 }
 
@@ -465,11 +458,12 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
   constexpr double maximumTanBeta = 3.0;
   constexpr double matchingToleranceBins = 1.0;
 
-  // Number of failed events for which the complete Hough plane and hits are saved.
+  // Number of failed events for which the complete Hough plane and hits are
+  // saved.
   constexpr std::size_t numberErrorsToSave = 10;
 
-  auto logger = Acts::getDefaultLogger(
-      "CudaEtaHoughValidation", Acts::Logging::Level::INFO);
+  auto logger = Acts::getDefaultLogger("CudaEtaHoughValidation",
+                                       Acts::Logging::Level::INFO);
 
   RandomEngine engine{42u};
   auto generated = makeGeneratedEtaValidationBatch(
@@ -479,8 +473,7 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
   BOOST_REQUIRE_EQUAL(generated.spacePoints.bucketCount(), nEvents);
 
   const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
-      minimumTanBeta, maximumTanBeta,
-      -100.0 * Acts::UnitConstants::m,
+      minimumTanBeta, maximumTanBeta, -100.0 * Acts::UnitConstants::m,
       100.0 * Acts::UnitConstants::m};
 
   CudaHT::CudaHoughPlaneBatch plane{{64u, 32u}, nEvents};
@@ -565,13 +558,12 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
       constexpr std::size_t maximumId = 0;
       recoTanBeta = maxima.tanBeta(event, maximumId);
       recoY0 = maxima.interceptY(event, maximumId);
-      nAssociatedHits = static_cast<std::uint32_t>(
-          maxima.nAssociatedHits(event, maximumId));
+      nAssociatedHits =
+          static_cast<std::uint32_t>(maxima.nAssociatedHits(event, maximumId));
       nLayers = maxima.nLayers(event, maximumId);
 
-      enoughHits =
-          nAssociatedHits >= minimumSeedHits &&
-          nLayers >= static_cast<double>(minimumSeedHits);
+      enoughHits = nAssociatedHits >= minimumSeedHits &&
+                   nLayers >= static_cast<double>(minimumSeedHits);
 
       if (enoughHits != 0) {
         ++enoughHitEvents;
@@ -590,8 +582,7 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
 
       const bool tanBetaMatched =
           std::abs(tanBetaErrorBins) <= matchingToleranceBins;
-      const bool y0Matched =
-          std::abs(y0ErrorBins) <= matchingToleranceBins;
+      const bool y0Matched = std::abs(y0ErrorBins) <= matchingToleranceBins;
       const bool truthMatched = tanBetaMatched && y0Matched;
 
       tanBetaMatchedEvents += tanBetaMatched;
@@ -612,30 +603,24 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
 
       if (enoughHits != 0 && !truthMatched &&
           savedErrors < numberErrorsToSave) {
-        const std::string prefix =
-            "case_" + std::to_string(savedErrors) +
-            "_event_" + std::to_string(event);
+        const std::string prefix = "case_" + std::to_string(savedErrors) +
+                                   "_event_" + std::to_string(event);
 
         const auto hitsPath = debugDirectory / (prefix + "_hits.csv");
-        const auto histogramPath =
-            debugDirectory / (prefix + "_histogram.csv");
+        const auto histogramPath = debugDirectory / (prefix + "_histogram.csv");
 
         writeBucketHitsCsv(hitsPath, generated.spacePoints, event);
-        writeHoughHistogramCsv(histogramPath, plane, event, ranges,
-                               trueTanBeta, trueY0, recoTanBeta, recoY0);
+        writeHoughHistogramCsv(histogramPath, plane, event, ranges, trueTanBeta,
+                               trueY0, recoTanBeta, recoY0);
 
         BOOST_TEST_MESSAGE(
-            "Saved failed event " << event
-            << ": true tanBeta=" << trueTanBeta
-            << ", reco tanBeta=" << recoTanBeta
-            << ", error=" << tanBetaError
+            "Saved failed event "
+            << event << ": true tanBeta=" << trueTanBeta
+            << ", reco tanBeta=" << recoTanBeta << ", error=" << tanBetaError
             << " (" << tanBetaErrorBins << " bins)"
-            << ", true y0=" << trueY0
-            << ", reco y0=" << recoY0
-            << ", error=" << y0Error
-            << " (" << y0ErrorBins << " bins)"
-            << ", hits=" << nAssociatedHits
-            << ", layers=" << nLayers);
+            << ", true y0=" << trueY0 << ", reco y0=" << recoY0
+            << ", error=" << y0Error << " (" << y0ErrorBins << " bins)"
+            << ", hits=" << nAssociatedHits << ", layers=" << nLayers);
 
         ++savedErrors;
       }
@@ -652,21 +637,27 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
 
   BOOST_TEST_MESSAGE("Eta Hough validation summary:");
   BOOST_TEST_MESSAGE("  Generated: " << nEvents);
-  BOOST_TEST_MESSAGE("  Maximum found: " << maximumEvents << "/" << nEvents
-                                          << " (" << efficiency(maximumEvents, nEvents) << "%)");
-  BOOST_TEST_MESSAGE("  Enough hits: " << enoughHitEvents << "/" << nEvents
-                                       << " (" << efficiency(enoughHitEvents, nEvents) << "%)");
-  BOOST_TEST_MESSAGE("  tanBeta matched: " << tanBetaMatchedEvents << "/" << maximumEvents
-                                           << " (" << efficiency(tanBetaMatchedEvents, maximumEvents) << "%)");
-  BOOST_TEST_MESSAGE("  y0 matched: " << y0MatchedEvents << "/" << maximumEvents
-                                      << " (" << efficiency(y0MatchedEvents, maximumEvents) << "%)");
-  BOOST_TEST_MESSAGE("  Reconstructed: " << reconstructedEvents << "/" << nEvents
-                                         << " (" << efficiency(reconstructedEvents, nEvents) << "%)");
+  BOOST_TEST_MESSAGE("  Maximum found: "
+                     << maximumEvents << "/" << nEvents << " ("
+                     << efficiency(maximumEvents, nEvents) << "%)");
+  BOOST_TEST_MESSAGE("  Enough hits: "
+                     << enoughHitEvents << "/" << nEvents << " ("
+                     << efficiency(enoughHitEvents, nEvents) << "%)");
+  BOOST_TEST_MESSAGE("  tanBeta matched: "
+                     << tanBetaMatchedEvents << "/" << maximumEvents << " ("
+                     << efficiency(tanBetaMatchedEvents, maximumEvents)
+                     << "%)");
+  BOOST_TEST_MESSAGE("  y0 matched: "
+                     << y0MatchedEvents << "/" << maximumEvents << " ("
+                     << efficiency(y0MatchedEvents, maximumEvents) << "%)");
+  BOOST_TEST_MESSAGE("  Reconstructed: "
+                     << reconstructedEvents << "/" << nEvents << " ("
+                     << efficiency(reconstructedEvents, nEvents) << "%)");
   BOOST_TEST_MESSAGE("  Failed tanBeta only: " << failedTanBetaOnly);
   BOOST_TEST_MESSAGE("  Failed y0 only: " << failedY0Only);
   BOOST_TEST_MESSAGE("  Failed both: " << failedBoth);
-  BOOST_TEST_MESSAGE("  Saved debug cases: " << savedErrors
-                                              << " in " << debugDirectory.string());
+  BOOST_TEST_MESSAGE("  Saved debug cases: " << savedErrors << " in "
+                                             << debugDirectory.string());
 
   BOOST_REQUIRE_GT(maximumEvents, 0u);
   BOOST_REQUIRE_GT(reconstructedEvents, 0u);
@@ -675,8 +666,8 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
   outputFile.Close();
 
   BOOST_TEST_MESSAGE("Wrote " << outTree->GetEntries()
-                               << " entries to CudaEtaHoughValidation.root:"
-                                  "EtaHoughTree");
+                              << " entries to CudaEtaHoughValidation.root:"
+                                 "EtaHoughTree");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

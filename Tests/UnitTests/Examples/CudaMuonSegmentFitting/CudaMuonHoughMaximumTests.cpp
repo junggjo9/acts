@@ -67,26 +67,23 @@ BOOST_AUTO_TEST_CASE(CudaMuonHoughMaximumExactAssociationStorage) {
   // bucket 0 -> 3, 1
   // bucket 1 -> 2, unused
   // bucket 2 -> unused, unused
-  const std::array<std::uint32_t, 6u> nAssociatedHits{
-      3u, 1u, 2u, 0u, 0u, 0u};
+  const std::array<std::uint32_t, 6u> nAssociatedHits{3u, 1u, 2u, 0u, 0u, 0u};
 
-  const std::array<ActsExamples::CoordType, 6u> tanBeta{
-      42.0, 43.0, 44.0, 0.0, 0.0, 0.0};
+  const std::array<ActsExamples::CoordType, 6u> tanBeta{42.0, 43.0, 44.0,
+                                                        0.0,  0.0,  0.0};
 
-  BOOST_REQUIRE_EQUAL(
-      cudaMemcpy(device.nMaxima, nMaxima.data(), sizeof(nMaxima),
-                 cudaMemcpyHostToDevice),
-      cudaSuccess);
+  BOOST_REQUIRE_EQUAL(cudaMemcpy(device.nMaxima, nMaxima.data(),
+                                 sizeof(nMaxima), cudaMemcpyHostToDevice),
+                      cudaSuccess);
 
   BOOST_REQUIRE_EQUAL(
       cudaMemcpy(device.nAssociatedHits, nAssociatedHits.data(),
                  sizeof(nAssociatedHits), cudaMemcpyHostToDevice),
       cudaSuccess);
 
-  BOOST_REQUIRE_EQUAL(
-      cudaMemcpy(device.tanBeta, tanBeta.data(), sizeof(tanBeta),
-                 cudaMemcpyHostToDevice),
-      cudaSuccess);
+  BOOST_REQUIRE_EQUAL(cudaMemcpy(device.tanBeta, tanBeta.data(),
+                                 sizeof(tanBeta), cudaMemcpyHostToDevice),
+                      cudaSuccess);
 
   // Only nMaxima and nAssociatedHits are copied here.
   maxima.copyAssociationMetadataToHost();
@@ -115,19 +112,18 @@ BOOST_AUTO_TEST_CASE(CudaMuonHoughMaximumExactAssociationStorage) {
 
   std::array<std::uint32_t, 7u> offsets{};
 
-  BOOST_REQUIRE_EQUAL(
-      cudaMemcpy(offsets.data(), device.associatedHitOffsets, sizeof(offsets),
-                 cudaMemcpyDeviceToHost),
-      cudaSuccess);
+  BOOST_REQUIRE_EQUAL(cudaMemcpy(offsets.data(), device.associatedHitOffsets,
+                                 sizeof(offsets), cudaMemcpyDeviceToHost),
+                      cudaSuccess);
 
-  const std::array<std::uint32_t, 7u> expectedOffsets{
-      0u, 3u, 4u, 6u, 6u, 6u, 6u};
+  const std::array<std::uint32_t, 7u> expectedOffsets{0u, 3u, 4u, 6u,
+                                                      6u, 6u, 6u};
 
   BOOST_CHECK_EQUAL_COLLECTIONS(offsets.begin(), offsets.end(),
                                 expectedOffsets.begin(), expectedOffsets.end());
 
-  const std::array<std::uint32_t, 6u> associatedIndices{
-      10u, 11u, 12u, 20u, 30u, 31u};
+  const std::array<std::uint32_t, 6u> associatedIndices{10u, 11u, 12u,
+                                                        20u, 30u, 31u};
 
   BOOST_REQUIRE_EQUAL(
       cudaMemcpy(device.associatedHitIndices, associatedIndices.data(),
@@ -174,10 +170,9 @@ BOOST_AUTO_TEST_CASE(CudaMuonHoughMaximumExactAssociationStorage) {
   std::array<std::uint32_t, 3u> resetNMaxima{};
   std::array<std::uint32_t, 6u> resetNAssociatedHits{};
 
-  BOOST_REQUIRE_EQUAL(
-      cudaMemcpy(resetNMaxima.data(), device.nMaxima, sizeof(resetNMaxima),
-                 cudaMemcpyDeviceToHost),
-      cudaSuccess);
+  BOOST_REQUIRE_EQUAL(cudaMemcpy(resetNMaxima.data(), device.nMaxima,
+                                 sizeof(resetNMaxima), cudaMemcpyDeviceToHost),
+                      cudaSuccess);
 
   BOOST_REQUIRE_EQUAL(
       cudaMemcpy(resetNAssociatedHits.data(), device.nAssociatedHits,

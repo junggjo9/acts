@@ -20,7 +20,7 @@
 
 namespace ActsExamples::CudaHoughTransformUtils::detail {
 
-/// Round the value upward to nearest aligment multiply for sharedByte number
+/// Round the value upward to nearest alignment multiply for sharedByte number
 /// @param value: number to be rounded
 /// @param alignment: value of which multiple to align
 constexpr std::size_t alignUp(std::size_t value,
@@ -80,7 +80,7 @@ __device__ inline int binIndexDevice(double min, double max, unsigned nSteps,
 /// @param xBin: x bin
 /// @param yBin: y bin
 /// @param layer: Layer number of hit
-/// @param weight: Weight of one hit, normaly 1
+/// @param weight: Weight of one hit, normally 1
 __device__ inline void fillSharedBin(YieldType* sharedHits,
                                      YieldType* sharedLayers,
                                      LayerMask* sharedLayerMask,
@@ -99,7 +99,7 @@ __device__ inline void fillSharedBin(YieldType* sharedHits,
     return;
   }
 
-  // atomicOr retrns oldMask and applies layer bit to bitMask
+  // atomicOr returns oldMask and applies layer bit to bitMask
   const LayerMask oldMask = atomicOr(&sharedLayerMask[localBin], bit);
 
   // If bit was not in mask, add 1 (weight) to number of layers
@@ -172,7 +172,6 @@ __device__ inline bool betterCandidate(const GlobalMaximumCandidate& candidate,
 __device__ inline GlobalMaximumCandidate findGlobalMaximum(
     const YieldType* sharedHits, std::uint32_t nCells,
     GlobalMaximumCandidate* sharedCandidates) {
-
   // 1. Preprocess cells so there is one maximum per thread: 225->128
   GlobalMaximumCandidate localMaximum{};
 
@@ -243,9 +242,9 @@ __device__ inline std::uint32_t reserveMaximumSlot(
 /// @param bucket: bucket idx
 /// @param candidate: Hough Maximum object to append
 ///
-/// @note Operation can fail (return false) if bucket has no more 
-/// places for maximums -> number of maximums per bucket is 
-/// prealocated before the operation
+/// @note Operation can fail (return false) if bucket has no more
+/// places for maximums -> number of maximums per bucket is
+/// preallocated before the operation
 __device__ inline bool appendEtaMaximum(
     CudaHoughMaximumBatchArrays maxima, const CudaHoughPlaneBatchArrays plane,
     const HoughAxisRanges ranges, const YieldType* sharedLayers,

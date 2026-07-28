@@ -11,7 +11,6 @@
 #include "ActsExamples/EventData/CudaMuonHoughMaximum.hpp"
 #include "ActsExamples/EventData/CudaMuonSpacePoint.hpp"
 #include "ActsExamples/Utilities/CudaHoughTransformUtils.hpp"
-#include "ActsExamples/EventData/CudaMuonHoughMaximum.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -21,15 +20,18 @@ namespace ActsExamples::CudaHoughTransformUtils::EtaHoughTransform {
 
 namespace detail {
 
-void etaHoughTransformImpl(
-    CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
-    CudaHoughMaximumBatchArrays maxima, const HoughAxisRanges& axisRanges,
-    YieldType weight, std::uint32_t threadsPerBlock, std::uint32_t numBlocks);
+void etaHoughTransformImpl(CudaHoughPlaneBatch& plane,
+                           CudaMuonSpacePointContainer& spacePoints,
+                           CudaHoughMaximumBatchArrays maxima,
+                           const HoughAxisRanges& axisRanges, YieldType weight,
+                           std::uint32_t threadsPerBlock,
+                           std::uint32_t numBlocks);
 
-void fillEtaHitAssociationsImpl(
-    CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
-    CudaHoughMaximumBatchArrays maxima, const HoughAxisRanges& axisRanges,
-    std::uint32_t threadsPerBlock);
+void fillEtaHitAssociationsImpl(CudaHoughPlaneBatch& plane,
+                                CudaMuonSpacePointContainer& spacePoints,
+                                CudaHoughMaximumBatchArrays maxima,
+                                const HoughAxisRanges& axisRanges,
+                                std::uint32_t threadsPerBlock);
 
 }  // namespace detail
 
@@ -44,7 +46,6 @@ CudaHoughMaximumBatch<MaximaPerBucket> etaHoughTransform(
     CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
     const HoughAxisRanges& axisRanges, YieldType weight = YieldType{1.0},
     std::uint32_t threadsPerBlock = 128u, std::uint32_t numBlocks = 0u) {
-
   CudaHoughMaximumBatch<MaximaPerBucket> maxima{plane.nBuckets()};
   maxima.moveToDevice();
 
@@ -59,8 +60,8 @@ CudaHoughMaximumBatch<MaximaPerBucket> etaHoughTransform(
   maxima.allocateAssociationStorage();
 
   // 4. Fill the newly allocated index array.
-  detail::fillEtaHitAssociationsImpl(
-      plane, spacePoints, maxima.deviceArrays(), axisRanges, threadsPerBlock);
+  detail::fillEtaHitAssociationsImpl(plane, spacePoints, maxima.deviceArrays(),
+                                     axisRanges, threadsPerBlock);
 
   return maxima;
 }

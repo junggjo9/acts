@@ -16,7 +16,6 @@ namespace CudaHT = ActsExamples::CudaHoughTransformUtils;
 
 BOOST_AUTO_TEST_SUITE(CudaHoughTransformUtilsSuite)
 
-
 // This checks the batched cell model.
 //
 // We fill a cell in bucket 1 with four hit contributions:

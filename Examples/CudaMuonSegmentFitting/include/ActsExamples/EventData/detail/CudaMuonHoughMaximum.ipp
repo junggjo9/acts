@@ -75,18 +75,15 @@ CudaHoughMaximumBatch<MaximaPerBucket>::CudaHoughMaximumBatch(
       m_hostYBin{std::move(other.m_hostYBin)},
       m_hostNMaxima{std::move(other.m_hostNMaxima)},
       m_hostNAssociatedHits{std::move(other.m_hostNAssociatedHits)},
-      m_hostAssociatedHitOffsets{
-          std::move(other.m_hostAssociatedHitOffsets)},
-      m_hostAssociatedHitIndices{
-          std::move(other.m_hostAssociatedHitIndices)},
+      m_hostAssociatedHitOffsets{std::move(other.m_hostAssociatedHitOffsets)},
+      m_hostAssociatedHitIndices{std::move(other.m_hostAssociatedHitIndices)},
       m_associationMetadataOnHost{
           std::exchange(other.m_associationMetadataOnHost, false)},
       m_associationStorageAllocated{
           std::exchange(other.m_associationStorageAllocated, false)},
       m_associatedHitIndicesOnHost{
           std::exchange(other.m_associatedHitIndicesOnHost, false)},
-      m_device{
-          std::exchange(other.m_device, CudaHoughMaximumBatchArrays{})},
+      m_device{std::exchange(other.m_device, CudaHoughMaximumBatchArrays{})},
       m_onDevice{std::exchange(other.m_onDevice, false)} {}
 
 template <std::size_t MaximaPerBucket>
@@ -113,10 +110,8 @@ CudaHoughMaximumBatch<MaximaPerBucket>::operator=(
 
   m_hostNMaxima = std::move(other.m_hostNMaxima);
   m_hostNAssociatedHits = std::move(other.m_hostNAssociatedHits);
-  m_hostAssociatedHitOffsets =
-      std::move(other.m_hostAssociatedHitOffsets);
-  m_hostAssociatedHitIndices =
-      std::move(other.m_hostAssociatedHitIndices);
+  m_hostAssociatedHitOffsets = std::move(other.m_hostAssociatedHitOffsets);
+  m_hostAssociatedHitIndices = std::move(other.m_hostAssociatedHitIndices);
 
   m_associationMetadataOnHost =
       std::exchange(other.m_associationMetadataOnHost, false);
@@ -125,8 +120,7 @@ CudaHoughMaximumBatch<MaximaPerBucket>::operator=(
   m_associatedHitIndicesOnHost =
       std::exchange(other.m_associatedHitIndicesOnHost, false);
 
-  m_device =
-      std::exchange(other.m_device, CudaHoughMaximumBatchArrays{});
+  m_device = std::exchange(other.m_device, CudaHoughMaximumBatchArrays{});
   m_onDevice = std::exchange(other.m_onDevice, false);
 
   return *this;
@@ -189,16 +183,16 @@ LayerMask CudaHoughMaximumBatch<MaximaPerBucket>::layerMask(
 
 template <std::size_t MaximaPerBucket>
 typename CudaHoughMaximumBatch<MaximaPerBucket>::size_type
-CudaHoughMaximumBatch<MaximaPerBucket>::xBin(
-    size_type bucket, size_type maximum) const {
+CudaHoughMaximumBatch<MaximaPerBucket>::xBin(size_type bucket,
+                                             size_type maximum) const {
   checkMaximum(bucket, maximum);
   return static_cast<size_type>(m_hostXBin[slotIndex(bucket, maximum)]);
 }
 
 template <std::size_t MaximaPerBucket>
 typename CudaHoughMaximumBatch<MaximaPerBucket>::size_type
-CudaHoughMaximumBatch<MaximaPerBucket>::yBin(
-    size_type bucket, size_type maximum) const {
+CudaHoughMaximumBatch<MaximaPerBucket>::yBin(size_type bucket,
+                                             size_type maximum) const {
   checkMaximum(bucket, maximum);
   return static_cast<size_type>(m_hostYBin[slotIndex(bucket, maximum)]);
 }
@@ -208,8 +202,7 @@ typename CudaHoughMaximumBatch<MaximaPerBucket>::size_type
 CudaHoughMaximumBatch<MaximaPerBucket>::nAssociatedHits(
     size_type bucket, size_type maximum) const {
   if (!m_associationMetadataOnHost) {
-    throw std::logic_error(
-        "Association metadata is not available on the host");
+    throw std::logic_error("Association metadata is not available on the host");
   }
 
   checkMaximum(bucket, maximum);
@@ -246,8 +239,7 @@ void CudaHoughMaximumBatch<MaximaPerBucket>::moveToDevice() {
   m_associatedHitIndicesOnHost = false;
 
   m_device.nBuckets = static_cast<std::uint32_t>(nBuckets());
-  m_device.capacityPerBucket =
-      static_cast<std::uint32_t>(capacityPerBucket());
+  m_device.capacityPerBucket = static_cast<std::uint32_t>(capacityPerBucket());
 
   try {
     allocateDeviceColumn(m_device.tanBeta, totalCapacity());
@@ -306,8 +298,7 @@ void CudaHoughMaximumBatch<MaximaPerBucket>::moveToHost() {
 }
 
 template <std::size_t MaximaPerBucket>
-void CudaHoughMaximumBatch<
-    MaximaPerBucket>::copyAssociationMetadataToHost() {
+void CudaHoughMaximumBatch<MaximaPerBucket>::copyAssociationMetadataToHost() {
   if (!m_onDevice) {
     throw std::logic_error("CudaHoughMaximumBatch is not on the device");
   }
@@ -319,8 +310,7 @@ void CudaHoughMaximumBatch<
 }
 
 template <std::size_t MaximaPerBucket>
-void CudaHoughMaximumBatch<
-    MaximaPerBucket>::allocateAssociationStorage() {
+void CudaHoughMaximumBatch<MaximaPerBucket>::allocateAssociationStorage() {
   if (!m_onDevice) {
     throw std::logic_error("CudaHoughMaximumBatch is not on the device");
   }
@@ -353,8 +343,7 @@ void CudaHoughMaximumBatch<
         totalAssociatedHits += count;
       }
 
-      if (totalAssociatedHits >
-          std::numeric_limits<std::uint32_t>::max()) {
+      if (totalAssociatedHits > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error(
             "Total associated hit count must fit into std::uint32_t");
       }
@@ -390,8 +379,7 @@ void CudaHoughMaximumBatch<
 }
 
 template <std::size_t MaximaPerBucket>
-void CudaHoughMaximumBatch<
-    MaximaPerBucket>::copyAssociatedHitIndicesToHost() {
+void CudaHoughMaximumBatch<MaximaPerBucket>::copyAssociatedHitIndicesToHost() {
   if (!m_onDevice) {
     throw std::logic_error("CudaHoughMaximumBatch is not on the device");
   }
@@ -400,8 +388,7 @@ void CudaHoughMaximumBatch<
     throw std::logic_error("Association storage has not been allocated");
   }
 
-  copyColumnToHost(m_hostAssociatedHitIndices,
-                   m_device.associatedHitIndices);
+  copyColumnToHost(m_hostAssociatedHitIndices, m_device.associatedHitIndices);
 
   m_associatedHitIndicesOnHost = true;
 }
@@ -413,15 +400,13 @@ void CudaHoughMaximumBatch<MaximaPerBucket>::resetOnDevice() {
   }
 
   std::fill(m_hostNMaxima.begin(), m_hostNMaxima.end(), 0u);
-  std::fill(m_hostNAssociatedHits.begin(),
-            m_hostNAssociatedHits.end(), 0u);
+  std::fill(m_hostNAssociatedHits.begin(), m_hostNAssociatedHits.end(), 0u);
 
-  ACTS_CUDA_CHECK(cudaMemset(
-      m_device.nMaxima, 0, nBuckets() * sizeof(std::uint32_t)));
+  ACTS_CUDA_CHECK(
+      cudaMemset(m_device.nMaxima, 0, nBuckets() * sizeof(std::uint32_t)));
 
-  ACTS_CUDA_CHECK(cudaMemset(
-      m_device.nAssociatedHits, 0,
-      totalCapacity() * sizeof(std::uint32_t)));
+  ACTS_CUDA_CHECK(cudaMemset(m_device.nAssociatedHits, 0,
+                             totalCapacity() * sizeof(std::uint32_t)));
 
   clearAssociationStorage();
 
@@ -467,8 +452,7 @@ template <std::size_t MaximaPerBucket>
 void CudaHoughMaximumBatch<MaximaPerBucket>::checkBucket(
     size_type bucket) const {
   if (bucket >= nBuckets()) {
-    throw std::out_of_range(
-        "CudaHoughMaximumBatch bucket index out of range");
+    throw std::out_of_range("CudaHoughMaximumBatch bucket index out of range");
   }
 }
 
@@ -476,8 +460,7 @@ template <std::size_t MaximaPerBucket>
 void CudaHoughMaximumBatch<MaximaPerBucket>::checkMaximum(
     size_type bucket, size_type maximum) const {
   if (maximum >= nMaxima(bucket)) {
-    throw std::out_of_range(
-        "CudaHoughMaximumBatch maximum index out of range");
+    throw std::out_of_range("CudaHoughMaximumBatch maximum index out of range");
   }
 }
 
