@@ -4,6 +4,7 @@ set(unittest_extra_libraries
     Acts::ExamplesCudaMuonSegmentFitting
     Acts::ExamplesFramework
     CUDA::cudart
+    ROOT::TreePlayer
     ROOT::Tree
     ROOT::RIO
     ROOT::Core

@@ -571,8 +571,8 @@ void runEtaValidation(EtaValidationBatch& batch,
   const double elapsedSeconds =
       std::chrono::duration<double>(stop - start).count();
 
-  // The full plane is copied only for validation and failed-event CSV output.
-  // It is deliberately excluded from the performance timing above.
+  // Copying validation data is excluded from the algorithm timing.
+  maxima.copyAssociatedHitIndicesToHost();
   plane.moveToHost();
 
   const double bucketsPerSecond =
@@ -601,6 +601,8 @@ void runEtaValidation(EtaValidationBatch& batch,
   char enoughHits = 0;
   char converged = 0;
 
+  std::vector<std::uint32_t> associatedHitIndices{};
+
   outTree->Branch("eventNumber", &eventNumber);
   outTree->Branch("nGeneratedHits", &nGeneratedHits);
   outTree->Branch("nAssociatedHits", &nAssociatedHits);
@@ -612,6 +614,7 @@ void runEtaValidation(EtaValidationBatch& batch,
   outTree->Branch("foundMaximum", &foundMaximum);
   outTree->Branch("enoughHits", &enoughHits);
   outTree->Branch("converged", &converged);
+  outTree->Branch("associatedHitIndices", &associatedHitIndices);
 
   std::size_t maximumEvents = 0u;
   std::size_t enoughHitEvents = 0u;
@@ -631,6 +634,8 @@ void runEtaValidation(EtaValidationBatch& batch,
   }
 
   for (std::size_t event = 0u; event < nEvents; ++event) {
+    associatedHitIndices.clear();
+
     eventNumber = static_cast<std::uint32_t>(event);
     nGeneratedHits = batch.truth[event].nGeneratedHits;
     trueTanBeta = batch.truth[event].tanBeta;
@@ -654,6 +659,33 @@ void runEtaValidation(EtaValidationBatch& batch,
       nAssociatedHits =
           static_cast<std::uint32_t>(maxima.nAssociatedHits(event, maximumId));
       nLayers = maxima.nLayers(event, maximumId);
+
+      //
+      const std::size_t bucketStart =
+          batch.spacePoints.bucketStart(event);
+      const std::size_t bucketEnd =
+          batch.spacePoints.bucketEnd(event);
+
+      const auto associatedSpan =
+          maxima.associatedHitIndices(event, maximumId);
+
+      associatedHitIndices.reserve(associatedSpan.size());
+
+      for (const std::uint32_t globalHitIndex : associatedSpan) {
+        BOOST_REQUIRE_GE(
+            static_cast<std::size_t>(globalHitIndex), bucketStart);
+
+        BOOST_REQUIRE_LT(
+            static_cast<std::size_t>(globalHitIndex), bucketEnd);
+
+        const std::size_t localHitIndex =
+            static_cast<std::size_t>(globalHitIndex) - bucketStart;
+
+        BOOST_REQUIRE_LT(localHitIndex, nGeneratedHits);
+
+        associatedHitIndices.push_back(
+            static_cast<std::uint32_t>(localHitIndex));
+      }
 
       enoughHits = nAssociatedHits >= minimumSeedHits &&
                    nLayers >= static_cast<double>(minimumSeedHits);
