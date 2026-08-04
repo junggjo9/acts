@@ -47,6 +47,7 @@
 using namespace ActsTests;
 
 namespace {
+/// One truth line and the bucket-local hits assigned to it by preprocessing.
 struct EtaValidationTruth {
   std::uint32_t validationBucketId = 0u;
   std::uint32_t eventId = 0u;
@@ -57,18 +58,21 @@ struct EtaValidationTruth {
   std::vector<std::uint32_t> truthHitIndices{};
 };
 
+/// Lightweight metadata for one physical Hough input bucket.
 struct EtaValidationBucket {
   std::uint32_t eventId = 0u;
   std::uint16_t sourceBucketId = 0u;
   std::uint16_t nTruthSegments = 0u;
 };
 
+/// Complete input to one validation run, shared by generated and file data.
 struct EtaValidationBatch {
   ActsExamples::CudaMuonSpacePointContainer spacePoints;
   std::vector<EtaValidationBucket> buckets;
   std::vector<EtaValidationTruth> truth;
 };
 
+/// Generator-only values used while constructing the common validation batch.
 struct GeneratedEtaTruth {
   double tanBeta = 0.0;
   double y0 = 0.0;
@@ -76,11 +80,14 @@ struct GeneratedEtaTruth {
   std::uint32_t nGeneratedHits = 0u;
 };
 
+/// Generate simple straw events and convert them to the common validation form.
 EtaValidationBatch makeGeneratedEtaValidationBatch(std::size_t nEvents,
                                                    RandomEngine& engine,
                                                    const Acts::Logger& logger,
                                                    double minimumTanBeta,
                                                    double maximumTanBeta) {
+  // 1. Generate smeared straw measurements and retain only straight lines
+  // inside the Hough transform's tanBeta range.
   MeasurementGenerator::Config generatorConfig{};
   generatorConfig.createStraws = true;
   generatorConfig.smearRadius = true;
@@ -155,6 +162,8 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(std::size_t nEvents,
 
   std::size_t hitIndex = 0u;
 
+  // 2. Flatten generated events into the contiguous, bucketed space-point
+  // representation consumed by the CUDA implementation.
   for (std::size_t event = 0u; event < nEvents; ++event) {
     const std::size_t bucketStart = hitIndex;
 
@@ -185,6 +194,8 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(std::size_t nEvents,
 
     spacePoints.addBucket(bucketStart, hitIndex);
 
+    // 3. There is no background in this sample, so every local bucket hit is
+    // attached to its single generated truth segment.
     std::vector<std::uint32_t> truthHitIndices(
         generatedTruth[event].nGeneratedHits);
     std::iota(truthHitIndices.begin(), truthHitIndices.end(), 0u);
@@ -202,6 +213,7 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(std::size_t nEvents,
 }
 
 
+/// Host-side copy of one hit row read from EtaValidationInput.
 struct FileEtaHit {
   Acts::GeometryIdentifier geometryId{};
   std::uint32_t muonId = 0u;
@@ -213,16 +225,22 @@ struct FileEtaHit {
   std::array<double, 3> covariance{};
 };
 
+/// Read the two preprocessed ROOT trees and rebuild a CUDA validation batch.
 EtaValidationBatch fileReadEtaValidation(
     const std::filesystem::path& inputPath,
     std::size_t maximumBuckets = std::numeric_limits<std::size_t>::max()) {
   using namespace Acts::UnitLiterals;
 
+  // ROOT model: TFile is the outer container, TTree is a column-oriented table,
+  // and each branch is one named column. TTreeReader advances through rows;
+  // TTreeReaderValue exposes the current scalar value of a bound branch.
   TFile inputFile{inputPath.c_str(), "READ"};
   if (inputFile.IsZombie()) {
     throw std::runtime_error("Failed to open " + inputPath.string());
   }
 
+  // 1. EtaValidationInput contains one row per hit. Consecutive rows with the
+  // same validation_bucket_id are grouped back into a physical bucket.
   TTreeReader reader{"EtaValidationInput", &inputFile};
   if (reader.IsInvalid()) {
     throw std::runtime_error(
@@ -262,6 +280,8 @@ EtaValidationBatch fileReadEtaValidation(
   UInt_t currentInputHits = 0u;
   UShort_t currentTruthSegments = 0u;
 
+  // Finalize a bucket when its identifier changes. These checks also validate
+  // that the ROOT file is complete and ordered as promised by preprocessing.
   const auto flushBucket = [&]() {
     if (!hasCurrentBucket) {
       return;
@@ -292,6 +312,7 @@ EtaValidationBatch fileReadEtaValidation(
         phiDegrees * 1._degree, thetaDegrees * 1._degree);
   };
 
+  // 2. reader.Next() loads one hit row and refreshes all bound branch values.
   while (reader.Next()) {
     const bool newBucket =
         !hasCurrentBucket ||
@@ -342,6 +363,9 @@ EtaValidationBatch fileReadEtaValidation(
         "EtaValidationInput contains no source bucket");
   }
 
+  // 3. EtaValidationTruth is normalized separately: one row per segment.
+  // TTreeReaderArray handles truth_hit_indices because that branch has a
+  // variable number of bucket-local indices in each row.
   TTreeReader truthReader{"EtaValidationTruth", &inputFile};
   if (truthReader.IsInvalid()) {
     throw std::runtime_error(
@@ -365,6 +389,7 @@ EtaValidationBatch fileReadEtaValidation(
   std::vector<EtaValidationTruth> truth{};
   std::vector<std::uint16_t> countedTruthSegments(buckets.size(), 0u);
 
+  // Validate every reference before copying it into the common truth model.
   while (truthReader.Next()) {
     if (*truthBucketId >= buckets.size()) {
       continue;
@@ -415,6 +440,8 @@ EtaValidationBatch fileReadEtaValidation(
     }
   }
 
+  // 4. Flatten temporary host buckets into the contiguous representation used
+  // by CUDA, while addBucket preserves every half-open bucket hit range.
   const std::size_t totalHits =
       std::accumulate(buckets.begin(), buckets.end(), std::size_t{0u},
                       [](std::size_t sum, const auto& bucket) {
@@ -460,6 +487,7 @@ BOOST_AUTO_TEST_SUITE(CudaHoughTransformUtilsSuite)
 
 namespace {
 
+/// Minimal, deterministic measurement used to test exact accumulator content.
 struct DriftCircleInput {
   double y;
   double z;
@@ -467,6 +495,7 @@ struct DriftCircleInput {
   double uncert;
 };
 
+/// Known hit pattern used by the deterministic global-maximum test.
 std::vector<DriftCircleInput> driftCircleInputs() {
   constexpr double uncert = 0.3;
 
@@ -482,6 +511,8 @@ std::vector<DriftCircleInput> driftCircleInputs() {
 
 ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
     std::size_t nBuckets, const std::vector<DriftCircleInput>& driftCircles) {
+  // Repeat the same known pattern with a y offset. This checks that batched
+  // buckets remain independent inside one CUDA invocation.
   const std::size_t hitsPerBucket = driftCircles.size();
 
   ActsExamples::CudaMuonSpacePointContainer container{nBuckets * hitsPerBucket};
@@ -519,10 +550,12 @@ ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
 
 ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
     std::size_t nBuckets) {
+  // Convenience overload using the standard deterministic hit pattern.
   return makeBatchedDriftCircleContainer(nBuckets, driftCircleInputs());
 }
 
-// Utility to save data to CSV  for python visualization
+// Export the small deterministic accumulator for external visual inspection.
+// This helper is not used for the large validation samples.
 void writeHoughHistogramCsv(
     const std::filesystem::path& path, const CudaHT::CudaHoughPlaneBatch& plane,
     const Acts::HoughTransformUtils::HoughAxisRanges& axisRanges) {
@@ -553,12 +586,14 @@ void writeHoughHistogramCsv(
 }
 
 std::uint32_t rawMuonIdLayer(std::uint32_t rawId) {
+  // Particle Gun muon IDs encode the zero-based logical layer in bits 17--20.
   static constexpr std::uint32_t fourBit = 0xFu;
   static constexpr std::uint32_t layerShift = 17u;
 
   return (rawId >> layerShift) & fourBit;
 }
 
+/// Export first-bucket measurements used by the deterministic visual check.
 void writeFirstBucketHitsCsv(
     const std::filesystem::path& path,
     const ActsExamples::CudaMuonSpacePointContainer& container) {
@@ -588,9 +623,12 @@ void writeFirstBucketHitsCsv(
   }
 }
 
+/// Run CUDA and serialize the common, analysis-ready four-tree ROOT output.
 void runEtaValidation(EtaValidationBatch& batch,
                       const std::string& validationName,
                       const std::filesystem::path& outputPath) {
+  // 1. Validate the common in-memory model before launching CUDA. These checks
+  // make failures in data preparation distinct from failures in the transform.
   constexpr std::uint32_t minimumSeedHits = 4u;
   constexpr double minimumTanBeta = -3.0;
   constexpr double maximumTanBeta = 3.0;
@@ -622,14 +660,24 @@ void runEtaValidation(EtaValidationBatch& batch,
                                 << " x " << plane.nBinsY() << " bins for "
                                 << nBuckets << " buckets");
 
+  // 2. Run every physical bucket as one batch. Capacity 16 keeps the schema
+  // ready for peak finders that return multiple maxima per bucket.
   auto maxima =
       CudaHT::EtaHoughTransform::etaHoughTransform<maximumCapacityPerBucket>(
           plane, batch.spacePoints, axisRanges);
 
+  // CUDA results live on the device. Copy only maxima and their associated hit
+  // indices to host memory; the full accumulator is intentionally not saved.
   maxima.moveToHost();
   maxima.copyAssociatedHitIndicesToHost();
 
   const std::string outputFileName = outputPath.string();
+  // 3. Create the ROOT output. RECREATE replaces an existing file. The four
+  // TTrees behave like related tables keyed by bucketNumber:
+  //   BucketTree: one row per bucket;
+  //   HitTree: one row per input hit;
+  //   TruthTree: one row per truth segment;
+  //   MaximumTree: one row per returned Hough maximum.
   TFile outputFile{outputFileName.c_str(), "RECREATE"};
   BOOST_REQUIRE_MESSAGE(!outputFile.IsZombie(),
                         "Failed to create " << outputPath.string());
@@ -638,6 +686,8 @@ void runEtaValidation(EtaValidationBatch& batch,
   auto hitTree = std::make_unique<TTree>("EtaHoughHitTree", "HitTree");
   auto truthTree = std::make_unique<TTree>("EtaHoughTruthTree", "TruthTree");
   auto maximumTree = std::make_unique<TTree>("EtaHoughTree", "MaximumTree");
+  // Keep explicit ownership in unique_ptr until WriteObject. Otherwise ROOT
+  // would attach the trees to the currently open file and own their lifetime.
   bucketTree->SetDirectory(nullptr);
   hitTree->SetDirectory(nullptr);
   truthTree->SetDirectory(nullptr);
@@ -649,6 +699,8 @@ void runEtaValidation(EtaValidationBatch& batch,
   std::uint16_t nTruthSegments = 0u;
   std::uint32_t nMaxima = 0u;
 
+  // Branch binds a ROOT column to a C++ variable address. Each later Fill()
+  // snapshots the variables' current values as one new tree row.
   bucketTree->Branch("bucketNumber", &bucketNumber);
   bucketTree->Branch("eventId", &eventId);
   bucketTree->Branch("sourceBucketId", &sourceBucketId);
@@ -664,6 +716,7 @@ void runEtaValidation(EtaValidationBatch& batch,
   double covarianceY = 0.0;
   std::uint32_t logicalLayer = 0u;
 
+  // Hit-tree columns. bucketNumber + localHitIndex uniquely identify a hit.
   hitTree->Branch("bucketNumber", &bucketNumber);
   hitTree->Branch("localHitIndex", &localHitIndex);
   hitTree->Branch("localX", &localX);
@@ -680,6 +733,7 @@ void runEtaValidation(EtaValidationBatch& batch,
   double trueY0 = 0.0;
   std::vector<std::uint32_t> truthHitIndices{};
 
+  // Truth-tree columns. std::vector creates a variable-length ROOT branch.
   truthTree->Branch("truthNumber", &truthNumber);
   truthTree->Branch("bucketNumber", &bucketNumber);
   truthTree->Branch("eventId", &eventId);
@@ -699,6 +753,7 @@ void runEtaValidation(EtaValidationBatch& batch,
   char enoughHits = 0;
   std::vector<std::uint32_t> associatedHitIndices{};
 
+  // Maximum-tree columns, including bucket-local associated hit indices.
   maximumTree->Branch("bucketNumber", &bucketNumber);
   maximumTree->Branch("maximumId", &maximumId);
   maximumTree->Branch("nAssociatedHits", &nAssociatedHits);
@@ -709,6 +764,8 @@ void runEtaValidation(EtaValidationBatch& batch,
   maximumTree->Branch("enoughHits", &enoughHits);
   maximumTree->Branch("associatedHitIndices", &associatedHitIndices);
 
+  // 4. Fill bucket, hit, and maximum trees together while bucket-local ranges
+  // and CUDA maximum indices are readily available.
   std::size_t totalMaxima = 0u;
   for (std::size_t bucket = 0u; bucket < nBuckets; ++bucket) {
     bucketNumber = static_cast<std::uint32_t>(bucket);
@@ -767,6 +824,8 @@ void runEtaValidation(EtaValidationBatch& batch,
 
   }
 
+  // 5. Truth is independent of the number of maxima, so fill its tree once
+  // from the input truth collection after processing all buckets.
   for (const EtaValidationTruth& truth : batch.truth) {
     truthNumber = static_cast<std::uint32_t>(truthTree->GetEntries());
     bucketNumber = truth.validationBucketId;
@@ -785,6 +844,7 @@ void runEtaValidation(EtaValidationBatch& batch,
                     static_cast<Long64_t>(batch.truth.size()));
   BOOST_CHECK_EQUAL(maximumTree->GetEntries(),
                     static_cast<Long64_t>(totalMaxima));
+  // 6. Persist the four in-memory trees into the TFile and close it explicitly.
   outputFile.WriteObject(bucketTree.get(), bucketTree->GetName());
   outputFile.WriteObject(hitTree.get(), hitTree->GetName());
   outputFile.WriteObject(truthTree.get(), truthTree->GetName());
@@ -797,6 +857,8 @@ void runEtaValidation(EtaValidationBatch& batch,
 }  // namespace
 
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
+  // Small white-box test: compare the reported maximum with the maximum found
+  // by inspecting the copied accumulator, then export both for visualization.
   auto spacePoints = makeBatchedDriftCircleContainer(1);
 
   constexpr double expectedTanTheta = -0.0401472 / 0.994974;
@@ -886,6 +948,8 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
 }
 
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
+  // Controlled end-to-end sample. This writes the same four ROOT trees as the
+  // Particle Gun test, allowing one analysis program to process both outputs.
   int deviceCount = 0;
   if (cudaGetDeviceCount(&deviceCount) != cudaSuccess || deviceCount == 0) {
     BOOST_TEST_MESSAGE("No CUDA device found, skipping CUDA runtime test");
@@ -909,6 +973,8 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
 }
 
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_file_validation) {
+  // Realistic end-to-end sample prepared by preprocessor_pg.py. The environment
+  // variable permits the large flat ROOT input to live outside the build tree.
   int deviceCount = 0;
   if (cudaGetDeviceCount(&deviceCount) != cudaSuccess || deviceCount == 0) {
     BOOST_TEST_MESSAGE("No CUDA device found, skipping CUDA runtime test");
@@ -924,7 +990,7 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_file_validation) {
   BOOST_REQUIRE_MESSAGE(
       std::filesystem::exists(inputPath),
       "Flat validation file not found: " << inputPath
-      << ". Run flatten_eta_validation.py first or set "
+      << ". Run preprocessor_pg.py first or set "
          "ACTS_MUON_VALIDATION_FLAT_ROOT.");
 
   auto loaded = fileReadEtaValidation(inputPath);
