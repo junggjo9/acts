@@ -35,8 +35,9 @@ void fillEtaHitAssociationsImpl(CudaHoughPlaneBatch& plane,
 
 }  // namespace detail
 
-/// Fill the Eta Hough planes, find one global maximum in each bucket and
-/// associate the contributing input space points with every maximum.
+/// Fill the Eta Hough planes, find the maxima selected by the configured peak
+/// finder in each bucket and associate the contributing input space points with
+/// every maximum.
 ///
 /// The returned maximum batch remains allocated on the device. Call
 /// moveToHost() when CPU access is required, but hit association has still to

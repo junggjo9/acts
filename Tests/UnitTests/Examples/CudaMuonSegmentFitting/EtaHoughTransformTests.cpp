@@ -16,17 +16,10 @@
 #include "Acts/Utilities/VectorHelpers.hpp"
 #include "ActsExamples/Algorithms/TrackFinding/EtaHoughTransform.hpp"
 #include "ActsExamples/EventData/CudaMuonSpacePoint.hpp"
-#include "ActsExamples/Framework/AlgorithmContext.hpp"
-#include "ActsExamples/Framework/DataHandle.hpp"
-#include "ActsExamples/Framework/WhiteBoard.hpp"
 #include "ActsExamples/Utilities/CudaHoughTransformUtils.hpp"
 
-#include <array>
-#include <numeric>
-#include <stdexcept>
-#include <unordered_map>
-
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -36,32 +29,51 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <numeric>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
-#include <chrono>
 
 #include <TFile.h>
 #include <TH1D.h>
 #include <TTree.h>
-#include <cuda_runtime.h>
 #include <TTreeReader.h>
+#include <TTreeReaderArray.h>
 #include <TTreeReaderValue.h>
+#include <cuda_runtime.h>
 
 #include "../../Core/Seeding/StrawHitGeneratorHelper.hpp"
 using namespace ActsTests;
 
 namespace {
 struct EtaValidationTruth {
+  std::uint32_t validationBucketId = 0u;
+  std::uint32_t eventId = 0u;
+  std::uint16_t sourceBucketId = 0u;
+  std::uint32_t segmentIndex = 0u;
   double tanBeta = 0.0;
   double y0 = 0.0;
-  double zReference = 0.0;
-  std::uint32_t nGeneratedHits = 0u;
+  std::vector<std::uint32_t> truthHitIndices{};
+};
+
+struct EtaValidationBucket {
+  std::uint32_t eventId = 0u;
+  std::uint16_t sourceBucketId = 0u;
+  std::uint16_t nTruthSegments = 0u;
 };
 
 struct EtaValidationBatch {
   ActsExamples::CudaMuonSpacePointContainer spacePoints;
+  std::vector<EtaValidationBucket> buckets;
   std::vector<EtaValidationTruth> truth;
+};
+
+struct GeneratedEtaTruth {
+  double tanBeta = 0.0;
+  double y0 = 0.0;
+  double zReference = 0.0;
+  std::uint32_t nGeneratedHits = 0u;
 };
 
 EtaValidationBatch makeGeneratedEtaValidationBatch(std::size_t nEvents,
@@ -76,10 +88,10 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(std::size_t nEvents,
   generatorConfig.createStrips = false;
 
   std::vector<Container_t> eventMeasurements{};
-  std::vector<EtaValidationTruth> truth{};
+  std::vector<GeneratedEtaTruth> generatedTruth{};
 
   eventMeasurements.reserve(nEvents);
-  truth.reserve(nEvents);
+  generatedTruth.reserve(nEvents);
 
   std::size_t totalHits = 0u;
 
@@ -126,14 +138,20 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(std::size_t nEvents,
     const double y0 =
         line.position().y() + tanBeta * (zReference - line.position().z());
 
-    truth.push_back({tanBeta, y0, zReference,
-                     static_cast<std::uint32_t>(measurements.size())});
+    generatedTruth.push_back(
+        {tanBeta, y0, zReference,
+         static_cast<std::uint32_t>(measurements.size())});
 
     totalHits += measurements.size();
     eventMeasurements.push_back(std::move(measurements));
   }
 
   ActsExamples::CudaMuonSpacePointContainer spacePoints{totalHits};
+  std::vector<EtaValidationBucket> buckets{};
+  std::vector<EtaValidationTruth> truth{};
+
+  buckets.reserve(nEvents);
+  truth.reserve(nEvents);
 
   std::size_t hitIndex = 0u;
 
@@ -142,7 +160,7 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(std::size_t nEvents,
 
     for (const auto& measurement : eventMeasurements[event]) {
       Acts::Vector3 position = measurement->localPosition();
-      position.z() -= truth[event].zReference;
+      position.z() -= generatedTruth[event].zReference;
 
       const auto& covariance = measurement->covariance();
 
@@ -166,9 +184,21 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(std::size_t nEvents,
     }
 
     spacePoints.addBucket(bucketStart, hitIndex);
+
+    std::vector<std::uint32_t> truthHitIndices(
+        generatedTruth[event].nGeneratedHits);
+    std::iota(truthHitIndices.begin(), truthHitIndices.end(), 0u);
+
+    buckets.push_back(
+        {static_cast<std::uint32_t>(event), 0u, 1u});
+    truth.push_back(
+        {static_cast<std::uint32_t>(event),
+         static_cast<std::uint32_t>(event), 0u, 0u,
+         generatedTruth[event].tanBeta, generatedTruth[event].y0,
+         std::move(truthHitIndices)});
   }
 
-  return {std::move(spacePoints), std::move(truth)};
+  return {std::move(spacePoints), std::move(buckets), std::move(truth)};
 }
 
 
@@ -181,12 +211,7 @@ struct FileEtaHit {
   double driftRadius = 0.0;
   double time = 0.0;
   std::array<double, 3> covariance{};
-  std::uint32_t logicalLayer = 0u;
 };
-
-constexpr std::size_t localY0Index = 0u;
-constexpr std::size_t localThetaIndex = 1u;
-constexpr std::size_t localPhiIndex = 3u;
 
 EtaValidationBatch fileReadEtaValidation(
     const std::filesystem::path& inputPath,
@@ -204,10 +229,12 @@ EtaValidationBatch fileReadEtaValidation(
         "EtaValidationInput tree not found in " + inputPath.string());
   }
 
+  TTreeReaderValue<UInt_t> validationBucketId{
+      reader, "validation_bucket_id"};
   TTreeReaderValue<UInt_t> eventId{reader, "event_id"};
-  TTreeReaderValue<UInt_t> segmentIndex{reader, "segment_index"};
-  TTreeReaderValue<Double_t> trueTanBeta{reader, "true_tanBeta"};
-  TTreeReaderValue<Double_t> trueY0{reader, "true_y0"};
+  TTreeReaderValue<UShort_t> sourceBucketId{reader, "source_bucket_id"};
+  TTreeReaderValue<UInt_t> nInputHits{reader, "n_input_hits"};
+  TTreeReaderValue<UShort_t> nTruthSegments{reader, "n_truth_segments"};
 
   TTreeReaderValue<ULong64_t> geometryId{reader, "geometry_id"};
   TTreeReaderValue<UInt_t> muonId{reader, "muon_id"};
@@ -223,27 +250,38 @@ EtaValidationBatch fileReadEtaValidation(
   TTreeReaderValue<Float_t> cov0{reader, "cov_loc0"};
   TTreeReaderValue<Float_t> cov1{reader, "cov_loc1"};
   TTreeReaderValue<Float_t> covT{reader, "cov_t"};
-  TTreeReaderValue<UInt_t> logicalLayer{reader, "logical_layer"};
 
   std::vector<std::vector<FileEtaHit>> buckets;
-  std::vector<EtaValidationTruth> truth;
+  std::vector<EtaValidationBucket> bucketMetadata;
   std::vector<FileEtaHit> currentHits;
 
   bool hasCurrentBucket = false;
+  UInt_t currentValidationBucket = 0u;
   UInt_t currentEvent = 0u;
-  UInt_t currentSegment = 0u;
-  double currentTanBeta = 0.0;
-  double currentY0 = 0.0;
+  UShort_t currentSourceBucket = 0u;
+  UInt_t currentInputHits = 0u;
+  UShort_t currentTruthSegments = 0u;
 
   const auto flushBucket = [&]() {
     if (!hasCurrentBucket) {
       return;
     }
 
-    if (currentHits.size() >= 3u && buckets.size() < maximumBuckets) {
-      truth.push_back({currentTanBeta, currentY0, 0.0,
-                       static_cast<std::uint32_t>(currentHits.size())});
+    if (currentValidationBucket != buckets.size()) {
+      throw std::runtime_error(
+          "EtaValidationInput bucket identifiers are not dense and ordered");
+    }
+
+    if (currentHits.size() != currentInputHits) {
+      throw std::runtime_error(
+          "Input-hit count mismatch in validation bucket " +
+          std::to_string(currentValidationBucket));
+    }
+
+    if (buckets.size() < maximumBuckets) {
       buckets.push_back(std::move(currentHits));
+      bucketMetadata.push_back(
+          {currentEvent, currentSourceBucket, currentTruthSegments});
     }
 
     currentHits.clear();
@@ -256,8 +294,8 @@ EtaValidationBatch fileReadEtaValidation(
 
   while (reader.Next()) {
     const bool newBucket =
-        !hasCurrentBucket || *eventId != currentEvent ||
-        *segmentIndex != currentSegment;
+        !hasCurrentBucket ||
+        *validationBucketId != currentValidationBucket;
 
     if (newBucket) {
       flushBucket();
@@ -267,16 +305,18 @@ EtaValidationBatch fileReadEtaValidation(
       }
 
       hasCurrentBucket = true;
+      currentValidationBucket = *validationBucketId;
       currentEvent = *eventId;
-      currentSegment = *segmentIndex;
-      currentTanBeta = *trueTanBeta;
-      currentY0 = *trueY0;
-    } else {
-      if (std::abs(*trueTanBeta - currentTanBeta) > 1.0e-10 ||
-          std::abs(*trueY0 - currentY0) > 1.0e-6) {
-        throw std::runtime_error(
-            "Truth parameters changed inside one event/segment group");
-      }
+      currentSourceBucket = *sourceBucketId;
+      currentInputHits = *nInputHits;
+      currentTruthSegments = *nTruthSegments;
+    } else if (*eventId != currentEvent ||
+               *sourceBucketId != currentSourceBucket ||
+               *nInputHits != currentInputHits ||
+               *nTruthSegments != currentTruthSegments) {
+      throw std::runtime_error(
+          "Metadata changed inside validation bucket " +
+          std::to_string(currentValidationBucket));
     }
 
     FileEtaHit hit{};
@@ -289,7 +329,6 @@ EtaValidationBatch fileReadEtaValidation(
     hit.driftRadius = std::abs(*driftRadius);
     hit.time = *time;
     hit.covariance = {*cov0, *cov1, *covT};
-    hit.logicalLayer = *logicalLayer;
 
     currentHits.push_back(std::move(hit));
   }
@@ -300,7 +339,80 @@ EtaValidationBatch fileReadEtaValidation(
 
   if (buckets.empty()) {
     throw std::runtime_error(
-        "EtaValidationInput contains no bucket with at least three hits");
+        "EtaValidationInput contains no source bucket");
+  }
+
+  TTreeReader truthReader{"EtaValidationTruth", &inputFile};
+  if (truthReader.IsInvalid()) {
+    throw std::runtime_error(
+        "EtaValidationTruth tree not found in " + inputPath.string());
+  }
+
+  TTreeReaderValue<UInt_t> validationTruthId{
+      truthReader, "validation_truth_id"};
+  TTreeReaderValue<UInt_t> truthBucketId{
+      truthReader, "validation_bucket_id"};
+  TTreeReaderValue<UInt_t> truthEventId{truthReader, "event_id"};
+  TTreeReaderValue<UShort_t> truthSourceBucketId{
+      truthReader, "source_bucket_id"};
+  TTreeReaderValue<UInt_t> segmentIndex{truthReader, "segment_index"};
+  TTreeReaderValue<UInt_t> nTruthHits{truthReader, "n_truth_hits"};
+  TTreeReaderValue<Double_t> trueTanBeta{truthReader, "true_tanBeta"};
+  TTreeReaderValue<Double_t> trueY0{truthReader, "true_y0"};
+  TTreeReaderArray<UInt_t> truthHitIndices{
+      truthReader, "truth_hit_indices"};
+
+  std::vector<EtaValidationTruth> truth{};
+  std::vector<std::uint16_t> countedTruthSegments(buckets.size(), 0u);
+
+  while (truthReader.Next()) {
+    if (*truthBucketId >= buckets.size()) {
+      continue;
+    }
+
+    if (*validationTruthId != truth.size()) {
+      throw std::runtime_error(
+          "EtaValidationTruth identifiers are not dense and ordered");
+    }
+
+    const EtaValidationBucket& metadata = bucketMetadata[*truthBucketId];
+    if (*truthEventId != metadata.eventId ||
+        *truthSourceBucketId != metadata.sourceBucketId) {
+      throw std::runtime_error(
+          "Truth metadata disagrees with validation bucket metadata");
+    }
+
+    if (truthHitIndices.GetSize() != *nTruthHits) {
+      throw std::runtime_error(
+          "Truth-hit count mismatch in validation truth record " +
+          std::to_string(*validationTruthId));
+    }
+
+    std::vector<std::uint8_t> seen(buckets[*truthBucketId].size(), 0u);
+    for (const UInt_t localHitIndex : truthHitIndices) {
+      if (localHitIndex >= seen.size() || seen[localHitIndex] != 0u) {
+        throw std::runtime_error(
+            "Invalid or duplicate local truth-hit index in truth record " +
+            std::to_string(*validationTruthId));
+      }
+      seen[localHitIndex] = 1u;
+    }
+
+    truth.push_back(
+        {*truthBucketId, *truthEventId, *truthSourceBucketId, *segmentIndex,
+         *trueTanBeta, *trueY0,
+         std::vector<std::uint32_t>(truthHitIndices.begin(),
+                                    truthHitIndices.end())});
+    ++countedTruthSegments[*truthBucketId];
+  }
+
+  for (std::size_t bucket = 0u; bucket < buckets.size(); ++bucket) {
+    if (countedTruthSegments[bucket] !=
+        bucketMetadata[bucket].nTruthSegments) {
+      throw std::runtime_error(
+          "Truth-segment count mismatch in validation bucket " +
+          std::to_string(bucket));
+    }
   }
 
   const std::size_t totalHits =
@@ -324,18 +436,17 @@ EtaValidationBatch fileReadEtaValidation(
       spacePoints.setTime(outputHit, hit.time);
       spacePoints.setCovariance(outputHit, hit.covariance[0],
                                 hit.covariance[1], hit.covariance[2]);
-      spacePoints.setLogicalLayer(outputHit, hit.logicalLayer);
       ++outputHit;
     }
 
     spacePoints.addBucket(bucketStart, outputHit);
   }
 
-  if (spacePoints.bucketCount() != truth.size()) {
-    throw std::runtime_error("Truth and CUDA bucket counts differ");
+  if (spacePoints.bucketCount() != bucketMetadata.size()) {
+    throw std::runtime_error("Metadata and CUDA bucket counts differ");
   }
 
-  return {std::move(spacePoints), std::move(truth)};
+  return {std::move(spacePoints), std::move(bucketMetadata), std::move(truth)};
 }
 
 
@@ -477,321 +588,210 @@ void writeFirstBucketHitsCsv(
   }
 }
 
-void writeHoughHistogramCsv(
-    const std::filesystem::path& path, const CudaHT::CudaHoughPlaneBatch& plane,
-    std::size_t bucket,
-    const Acts::HoughTransformUtils::HoughAxisRanges& ranges,
-    double trueTanBeta, double trueY0, double recoTanBeta, double recoY0) {
-  std::ofstream out{path};
-  BOOST_REQUIRE_MESSAGE(out, "Failed to open " << path.string());
-
-  out << std::setprecision(17);
-  out << "xBin,yBin,tanTheta,interceptY,nHits,nLayers,layerMask,"
-         "trueTanBeta,trueY0,recoTanBeta,recoY0\n";
-
-  for (std::size_t yBin = 0; yBin < plane.nBinsY(); ++yBin) {
-    for (std::size_t xBin = 0; xBin < plane.nBinsX(); ++xBin) {
-      const double tanTheta = Acts::HoughTransformUtils::binCenter(
-          ranges.xMin, ranges.xMax, plane.nBinsX(), xBin);
-      const double interceptY = Acts::HoughTransformUtils::binCenter(
-          ranges.yMin, ranges.yMax, plane.nBinsY(), yBin);
-
-      out << xBin << "," << yBin << "," << tanTheta << "," << interceptY << ","
-          << plane.nHits(bucket, xBin, yBin) << ","
-          << plane.nLayers(bucket, xBin, yBin) << ","
-          << static_cast<unsigned long long>(
-                 plane.layerMask(bucket, xBin, yBin))
-          << "," << trueTanBeta << "," << trueY0 << "," << recoTanBeta << ","
-          << recoY0 << "\n";
-    }
-  }
-}
-
-void writeBucketHitsCsv(
-    const std::filesystem::path& path,
-    const ActsExamples::CudaMuonSpacePointContainer& container,
-    std::size_t bucket) {
-  std::ofstream out{path};
-  BOOST_REQUIRE_MESSAGE(out, "Failed to open " << path.string());
-
-  const std::size_t start = container.bucketStart(bucket);
-  const std::size_t end = container.bucketEnd(bucket);
-
-  out << std::setprecision(17);
-  out << "hitIndex,x,y,z,r,uncert,layer\n";
-
-  for (std::size_t i = start; i < end; ++i) {
-    auto sp = container[i];
-    const Acts::Vector3& pos = sp->localPosition();
-    const std::array<double, 3>& cov = sp->covariance();
-
-    out << i - start << "," << pos.x() << "," << pos.y() << "," << pos.z()
-        << "," << sp->driftRadius() << "," << std::sqrt(std::max(cov[1], 0.0))
-        << "," << rawMuonIdLayer(container.muonId(i)) << "\n";
-  }
-}
-
 void runEtaValidation(EtaValidationBatch& batch,
                       const std::string& validationName,
-                      const std::filesystem::path& outputPath,
-                      const std::filesystem::path& debugDirectory,
-                      std::size_t numberErrorsToSave = 10u) {
+                      const std::filesystem::path& outputPath) {
   constexpr std::uint32_t minimumSeedHits = 4u;
   constexpr double minimumTanBeta = -3.0;
   constexpr double maximumTanBeta = 3.0;
-  constexpr double matchingToleranceBins = 1.0;
+  constexpr std::size_t maximumCapacityPerBucket = 16u;
 
-  const std::size_t nEvents = batch.truth.size();
+  const std::size_t nBuckets = batch.buckets.size();
 
-  BOOST_REQUIRE_GT(nEvents, 0u);
+  BOOST_REQUIRE_GT(nBuckets, 0u);
   BOOST_REQUIRE_GT(batch.spacePoints.size(), 0u);
-  BOOST_REQUIRE_EQUAL(batch.spacePoints.bucketCount(), nEvents);
+  BOOST_REQUIRE_EQUAL(batch.spacePoints.bucketCount(), nBuckets);
+
+  std::vector<std::uint16_t> countedTruthSegments(nBuckets, 0u);
+  for (const EtaValidationTruth& truth : batch.truth) {
+    BOOST_REQUIRE_LT(truth.validationBucketId, nBuckets);
+    ++countedTruthSegments[truth.validationBucketId];
+  }
+  for (std::size_t bucket = 0u; bucket < nBuckets; ++bucket) {
+    BOOST_REQUIRE_EQUAL(countedTruthSegments[bucket],
+                        batch.buckets[bucket].nTruthSegments);
+  }
 
   const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
       minimumTanBeta, maximumTanBeta, -100.0 * Acts::UnitConstants::m,
       100.0 * Acts::UnitConstants::m};
 
-  CudaHT::CudaHoughPlaneBatch plane{{64u, 32u}, nEvents};
+  CudaHT::CudaHoughPlaneBatch plane{{64u, 32u}, nBuckets};
 
   BOOST_TEST_MESSAGE("Running " << validationName << " with " << plane.nBinsX()
                                 << " x " << plane.nBinsY() << " bins for "
-                                << nEvents << " buckets");
+                                << nBuckets << " buckets");
 
-  // Input reading and container construction happen before this helper, so they
-  // are excluded from this timing.
-  const auto start = std::chrono::steady_clock::now();
+  auto maxima =
+      CudaHT::EtaHoughTransform::etaHoughTransform<maximumCapacityPerBucket>(
+          plane, batch.spacePoints, axisRanges);
 
-  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<1>(
-      plane, batch.spacePoints, axisRanges);
-
-  // This synchronizes the Hough work and copies the compact maximum results.
   maxima.moveToHost();
-
-  const auto stop = std::chrono::steady_clock::now();
-  const double elapsedSeconds =
-      std::chrono::duration<double>(stop - start).count();
-
-  // Copying validation data is excluded from the algorithm timing.
   maxima.copyAssociatedHitIndicesToHost();
-  plane.moveToHost();
-
-  const double bucketsPerSecond =
-      elapsedSeconds > 0.0 ? static_cast<double>(nEvents) / elapsedSeconds : 0.0;
-
-  BOOST_TEST_MESSAGE("  Hough runtime: " << 1000.0 * elapsedSeconds << " ms");
-  BOOST_TEST_MESSAGE("  Throughput: " << bucketsPerSecond << " buckets/s");
 
   const std::string outputFileName = outputPath.string();
   TFile outputFile{outputFileName.c_str(), "RECREATE"};
   BOOST_REQUIRE_MESSAGE(!outputFile.IsZombie(),
                         "Failed to create " << outputPath.string());
 
-  auto outTree = std::make_unique<TTree>("EtaHoughTree", "MonitorTree");
-  outTree->SetDirectory(nullptr);
+  auto bucketTree = std::make_unique<TTree>("EtaHoughBucketTree", "BucketTree");
+  auto hitTree = std::make_unique<TTree>("EtaHoughHitTree", "HitTree");
+  auto truthTree = std::make_unique<TTree>("EtaHoughTruthTree", "TruthTree");
+  auto maximumTree = std::make_unique<TTree>("EtaHoughTree", "MaximumTree");
+  bucketTree->SetDirectory(nullptr);
+  hitTree->SetDirectory(nullptr);
+  truthTree->SetDirectory(nullptr);
+  maximumTree->SetDirectory(nullptr);
+  std::uint32_t bucketNumber = 0u;
+  std::uint32_t eventId = 0u;
+  std::uint16_t sourceBucketId = 0u;
+  std::uint32_t nInputHits = 0u;
+  std::uint16_t nTruthSegments = 0u;
+  std::uint32_t nMaxima = 0u;
 
-  std::uint32_t eventNumber = 0u;
-  std::uint32_t nGeneratedHits = 0u;
-  std::uint32_t nAssociatedHits = 0u;
-  double nLayers = 0.0;
+  bucketTree->Branch("bucketNumber", &bucketNumber);
+  bucketTree->Branch("eventId", &eventId);
+  bucketTree->Branch("sourceBucketId", &sourceBucketId);
+  bucketTree->Branch("nInputHits", &nInputHits);
+  bucketTree->Branch("nTruthSegments", &nTruthSegments);
+  bucketTree->Branch("nMaxima", &nMaxima);
+
+  std::uint32_t localHitIndex = 0u;
+  double localX = 0.0;
+  double localY = 0.0;
+  double localZ = 0.0;
+  double driftRadius = 0.0;
+  double covarianceY = 0.0;
+  std::uint32_t logicalLayer = 0u;
+
+  hitTree->Branch("bucketNumber", &bucketNumber);
+  hitTree->Branch("localHitIndex", &localHitIndex);
+  hitTree->Branch("localX", &localX);
+  hitTree->Branch("localY", &localY);
+  hitTree->Branch("localZ", &localZ);
+  hitTree->Branch("driftRadius", &driftRadius);
+  hitTree->Branch("covarianceY", &covarianceY);
+  hitTree->Branch("logicalLayer", &logicalLayer);
+
+  std::uint32_t truthNumber = 0u;
+  std::uint32_t segmentIndex = 0u;
+  std::uint32_t nTruthHits = 0u;
   double trueTanBeta = 0.0;
   double trueY0 = 0.0;
+  std::vector<std::uint32_t> truthHitIndices{};
+
+  truthTree->Branch("truthNumber", &truthNumber);
+  truthTree->Branch("bucketNumber", &bucketNumber);
+  truthTree->Branch("eventId", &eventId);
+  truthTree->Branch("sourceBucketId", &sourceBucketId);
+  truthTree->Branch("segmentIndex", &segmentIndex);
+  truthTree->Branch("nTruthHits", &nTruthHits);
+  truthTree->Branch("trueTanBeta", &trueTanBeta);
+  truthTree->Branch("trueY0", &trueY0);
+  truthTree->Branch("truthHitIndices", &truthHitIndices);
+
+  std::uint32_t maximumId = 0u;
+  std::uint32_t nAssociatedHits = 0u;
+  double nHits = 0.0;
+  double nLayers = 0.0;
   double recoTanBeta = 0.0;
   double recoY0 = 0.0;
-  char foundMaximum = 0;
   char enoughHits = 0;
-  char converged = 0;
-
   std::vector<std::uint32_t> associatedHitIndices{};
 
-  outTree->Branch("eventNumber", &eventNumber);
-  outTree->Branch("nGeneratedHits", &nGeneratedHits);
-  outTree->Branch("nAssociatedHits", &nAssociatedHits);
-  outTree->Branch("nLayers", &nLayers);
-  outTree->Branch("trueTanBeta", &trueTanBeta);
-  outTree->Branch("trueY0", &trueY0);
-  outTree->Branch("recoTanBeta", &recoTanBeta);
-  outTree->Branch("recoY0", &recoY0);
-  outTree->Branch("foundMaximum", &foundMaximum);
-  outTree->Branch("enoughHits", &enoughHits);
-  outTree->Branch("converged", &converged);
-  outTree->Branch("associatedHitIndices", &associatedHitIndices);
+  maximumTree->Branch("bucketNumber", &bucketNumber);
+  maximumTree->Branch("maximumId", &maximumId);
+  maximumTree->Branch("nAssociatedHits", &nAssociatedHits);
+  maximumTree->Branch("nHits", &nHits);
+  maximumTree->Branch("nLayers", &nLayers);
+  maximumTree->Branch("recoTanBeta", &recoTanBeta);
+  maximumTree->Branch("recoY0", &recoY0);
+  maximumTree->Branch("enoughHits", &enoughHits);
+  maximumTree->Branch("associatedHitIndices", &associatedHitIndices);
 
-  std::size_t maximumEvents = 0u;
-  std::size_t enoughHitEvents = 0u;
-  std::size_t reconstructedEvents = 0u;
-  std::size_t tanBetaMatchedEvents = 0u;
-  std::size_t y0MatchedEvents = 0u;
-  std::size_t failedTanBetaOnly = 0u;
-  std::size_t failedY0Only = 0u;
-  std::size_t failedBoth = 0u;
-  std::size_t savedErrors = 0u;
+  std::size_t totalMaxima = 0u;
+  for (std::size_t bucket = 0u; bucket < nBuckets; ++bucket) {
+    bucketNumber = static_cast<std::uint32_t>(bucket);
+    eventId = batch.buckets[bucket].eventId;
+    sourceBucketId = batch.buckets[bucket].sourceBucketId;
+    nInputHits = static_cast<std::uint32_t>(
+        batch.spacePoints.bucketEnd(bucket) -
+        batch.spacePoints.bucketStart(bucket));
+    nTruthSegments = batch.buckets[bucket].nTruthSegments;
+    nMaxima = static_cast<std::uint32_t>(maxima.nMaxima(bucket));
+    totalMaxima += nMaxima;
+    bucketTree->Fill();
 
-  const double missingValue = std::numeric_limits<double>::quiet_NaN();
-
-  std::filesystem::remove_all(debugDirectory);
-  if (numberErrorsToSave > 0u) {
-    std::filesystem::create_directories(debugDirectory);
-  }
-
-  for (std::size_t event = 0u; event < nEvents; ++event) {
-    associatedHitIndices.clear();
-
-    eventNumber = static_cast<std::uint32_t>(event);
-    nGeneratedHits = batch.truth[event].nGeneratedHits;
-    trueTanBeta = batch.truth[event].tanBeta;
-    trueY0 = batch.truth[event].y0;
-
-    nAssociatedHits = 0u;
-    nLayers = 0.0;
-    recoTanBeta = missingValue;
-    recoY0 = missingValue;
-    foundMaximum = maxima.nMaxima(event) > 0u ? 1 : 0;
-    enoughHits = 0;
-    converged = 0;
-
-    if (foundMaximum != 0) {
-      ++maximumEvents;
-
-      constexpr std::size_t maximumId = 0u;
-
-      recoTanBeta = maxima.tanBeta(event, maximumId);
-      recoY0 = maxima.interceptY(event, maximumId);
-      nAssociatedHits =
-          static_cast<std::uint32_t>(maxima.nAssociatedHits(event, maximumId));
-      nLayers = maxima.nLayers(event, maximumId);
-
-      //
-      const std::size_t bucketStart =
-          batch.spacePoints.bucketStart(event);
-      const std::size_t bucketEnd =
-          batch.spacePoints.bucketEnd(event);
-
-      const auto associatedSpan =
-          maxima.associatedHitIndices(event, maximumId);
-
-      associatedHitIndices.reserve(associatedSpan.size());
-
-      for (const std::uint32_t globalHitIndex : associatedSpan) {
-        BOOST_REQUIRE_GE(
-            static_cast<std::size_t>(globalHitIndex), bucketStart);
-
-        BOOST_REQUIRE_LT(
-            static_cast<std::size_t>(globalHitIndex), bucketEnd);
-
-        const std::size_t localHitIndex =
-            static_cast<std::size_t>(globalHitIndex) - bucketStart;
-
-        BOOST_REQUIRE_LT(localHitIndex, nGeneratedHits);
-
-        associatedHitIndices.push_back(
-            static_cast<std::uint32_t>(localHitIndex));
-      }
-
-      enoughHits = nAssociatedHits >= minimumSeedHits &&
-                   nLayers >= static_cast<double>(minimumSeedHits);
-      enoughHitEvents += enoughHits != 0;
-
-      const auto ranges = plane.bucketAxisRanges(event, axisRanges);
-      const double tanBetaBinWidth =
-          (ranges.xMax - ranges.xMin) / static_cast<double>(plane.nBinsX());
-      const double y0BinWidth =
-          (ranges.yMax - ranges.yMin) / static_cast<double>(plane.nBinsY());
-
-      const double tanBetaError = recoTanBeta - trueTanBeta;
-      const double y0Error = recoY0 - trueY0;
-      const double tanBetaErrorBins = tanBetaError / tanBetaBinWidth;
-      const double y0ErrorBins = y0Error / y0BinWidth;
-
-      const bool tanBetaMatched =
-          std::abs(tanBetaErrorBins) <= matchingToleranceBins;
-      const bool y0Matched = std::abs(y0ErrorBins) <= matchingToleranceBins;
-      const bool truthMatched = tanBetaMatched && y0Matched;
-
-      tanBetaMatchedEvents += tanBetaMatched;
-      y0MatchedEvents += y0Matched;
-
-      if (!tanBetaMatched && !y0Matched) {
-        ++failedBoth;
-      } else if (!tanBetaMatched) {
-        ++failedTanBetaOnly;
-      } else if (!y0Matched) {
-        ++failedY0Only;
-      }
-
-      converged = enoughHits != 0 && truthMatched;
-      reconstructedEvents += converged != 0;
-
-      if (enoughHits != 0 && !truthMatched &&
-          savedErrors < numberErrorsToSave) {
-        const std::string prefix = "case_" + std::to_string(savedErrors) +
-                                   "_bucket_" + std::to_string(event);
-
-        const auto hitsPath = debugDirectory / (prefix + "_hits.csv");
-        const auto histogramPath = debugDirectory / (prefix + "_histogram.csv");
-
-        writeBucketHitsCsv(hitsPath, batch.spacePoints, event);
-        writeHoughHistogramCsv(histogramPath, plane, event, ranges, trueTanBeta,
-                               trueY0, recoTanBeta, recoY0);
-
-        BOOST_TEST_MESSAGE(
-            "Saved failed bucket " << event
-            << ": true tanBeta=" << trueTanBeta
-            << ", reco tanBeta=" << recoTanBeta
-            << ", error=" << tanBetaError << " (" << tanBetaErrorBins
-            << " bins), true y0=" << trueY0 << ", reco y0=" << recoY0
-            << ", error=" << y0Error << " (" << y0ErrorBins
-            << " bins), hits=" << nAssociatedHits << ", layers=" << nLayers);
-
-        ++savedErrors;
-      }
+    const std::size_t bucketStart = batch.spacePoints.bucketStart(bucket);
+    const std::size_t bucketEnd = batch.spacePoints.bucketEnd(bucket);
+    for (std::size_t hit = bucketStart; hit < bucketEnd; ++hit) {
+      const auto spacePoint = batch.spacePoints[hit];
+      const auto& position = spacePoint->localPosition();
+      localHitIndex = static_cast<std::uint32_t>(hit - bucketStart);
+      localX = position.x();
+      localY = position.y();
+      localZ = position.z();
+      driftRadius = spacePoint->driftRadius();
+      covarianceY = spacePoint->covariance()[1];
+      logicalLayer = rawMuonIdLayer(batch.spacePoints.muonId(hit));
+      hitTree->Fill();
     }
 
-    outTree->Fill();
+    for (std::size_t maximum = 0u; maximum < maxima.nMaxima(bucket);
+         ++maximum) {
+      maximumId = static_cast<std::uint32_t>(maximum);
+      nAssociatedHits = static_cast<std::uint32_t>(
+          maxima.nAssociatedHits(bucket, maximum));
+      nHits = maxima.nHits(bucket, maximum);
+      nLayers = maxima.nLayers(bucket, maximum);
+      recoTanBeta = maxima.tanBeta(bucket, maximum);
+      recoY0 = maxima.interceptY(bucket, maximum);
+      enoughHits = nAssociatedHits >= minimumSeedHits &&
+                           nLayers >= static_cast<double>(minimumSeedHits)
+                       ? 1
+                       : 0;
+
+      associatedHitIndices.clear();
+      const auto associatedSpan =
+          maxima.associatedHitIndices(bucket, maximum);
+      associatedHitIndices.reserve(associatedSpan.size());
+      for (const std::uint32_t globalHitIndex : associatedSpan) {
+        BOOST_REQUIRE_GE(static_cast<std::size_t>(globalHitIndex), bucketStart);
+        BOOST_REQUIRE_LT(static_cast<std::size_t>(globalHitIndex), bucketEnd);
+        associatedHitIndices.push_back(
+            static_cast<std::uint32_t>(globalHitIndex - bucketStart));
+      }
+      BOOST_REQUIRE_EQUAL(associatedHitIndices.size(), nAssociatedHits);
+      maximumTree->Fill();
+    }
+
   }
 
-  const auto efficiency = [](std::size_t passed, std::size_t total) {
-    return total == 0u
-               ? 0.0
-               : 100.0 * static_cast<double>(passed) /
-                     static_cast<double>(total);
-  };
+  for (const EtaValidationTruth& truth : batch.truth) {
+    truthNumber = static_cast<std::uint32_t>(truthTree->GetEntries());
+    bucketNumber = truth.validationBucketId;
+    eventId = truth.eventId;
+    sourceBucketId = truth.sourceBucketId;
+    segmentIndex = truth.segmentIndex;
+    nTruthHits = static_cast<std::uint32_t>(truth.truthHitIndices.size());
+    trueTanBeta = truth.tanBeta;
+    trueY0 = truth.y0;
+    truthHitIndices = truth.truthHitIndices;
+    truthTree->Fill();
+  }
 
-  BOOST_TEST_MESSAGE(validationName << " summary:");
-  BOOST_TEST_MESSAGE("  Buckets: " << nEvents);
-  BOOST_TEST_MESSAGE("  Maximum found: " << maximumEvents << "/" << nEvents
-                                          << " ("
-                                          << efficiency(maximumEvents, nEvents)
-                                          << "%)");
-  BOOST_TEST_MESSAGE("  Enough hits: " << enoughHitEvents << "/" << nEvents
-                                       << " ("
-                                       << efficiency(enoughHitEvents, nEvents)
-                                       << "%)");
-  BOOST_TEST_MESSAGE("  tanBeta matched: "
-                     << tanBetaMatchedEvents << "/" << maximumEvents << " ("
-                     << efficiency(tanBetaMatchedEvents, maximumEvents) << "%)");
-  BOOST_TEST_MESSAGE("  y0 matched: " << y0MatchedEvents << "/" << maximumEvents
-                                      << " ("
-                                      << efficiency(y0MatchedEvents,
-                                                    maximumEvents)
-                                      << "%)");
-  BOOST_TEST_MESSAGE("  Reconstructed: "
-                     << reconstructedEvents << "/" << nEvents << " ("
-                     << efficiency(reconstructedEvents, nEvents) << "%)");
-  BOOST_TEST_MESSAGE("  Failed tanBeta only: " << failedTanBetaOnly);
-  BOOST_TEST_MESSAGE("  Failed y0 only: " << failedY0Only);
-  BOOST_TEST_MESSAGE("  Failed both: " << failedBoth);
-  BOOST_TEST_MESSAGE("  Saved failed buckets: " << savedErrors << " in "
-                                                << debugDirectory.string());
-
-  BOOST_REQUIRE_GT(maximumEvents, 0u);
-  BOOST_REQUIRE_GT(reconstructedEvents, 0u);
-  BOOST_CHECK_EQUAL(outTree->GetEntries(), static_cast<Long64_t>(nEvents));
-
-  outputFile.WriteObject(outTree.get(), outTree->GetName());
+  BOOST_CHECK_EQUAL(bucketTree->GetEntries(), static_cast<Long64_t>(nBuckets));
+  BOOST_CHECK_EQUAL(truthTree->GetEntries(),
+                    static_cast<Long64_t>(batch.truth.size()));
+  BOOST_CHECK_EQUAL(maximumTree->GetEntries(),
+                    static_cast<Long64_t>(totalMaxima));
+  outputFile.WriteObject(bucketTree.get(), bucketTree->GetName());
+  outputFile.WriteObject(hitTree.get(), hitTree->GetName());
+  outputFile.WriteObject(truthTree.get(), truthTree->GetName());
+  outputFile.WriteObject(maximumTree.get(), maximumTree->GetName());
   outputFile.Close();
 
-  BOOST_TEST_MESSAGE("Wrote " << outTree->GetEntries() << " entries to "
-                              << outputPath.string() << ":EtaHoughTree");
+  BOOST_TEST_MESSAGE("Wrote validation data to " << outputPath.string());
 }
 
 }  // namespace
@@ -905,8 +905,7 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
   runEtaValidation(
       generated,
       "Generated Eta Hough validation",
-      "CudaEtaHoughValidation.root",
-      std::filesystem::current_path() / "eta_hough_generated_failed_events");
+      "CudaEtaHoughValidation.root");
 }
 
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_file_validation) {
@@ -928,15 +927,12 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_file_validation) {
       << ". Run flatten_eta_validation.py first or set "
          "ACTS_MUON_VALIDATION_FLAT_ROOT.");
 
-  // File reading and CUDA container construction are intentionally excluded
-  // from the performance timing inside runEtaValidation().
   auto loaded = fileReadEtaValidation(inputPath);
 
   runEtaValidation(
       loaded,
       "File Eta Hough validation",
-      "CudaEtaHoughFileValidation.root",
-      std::filesystem::current_path() / "eta_hough_file_failed_events");
+      "CudaEtaHoughFileValidation.root");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
