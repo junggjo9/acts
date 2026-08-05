@@ -73,33 +73,15 @@ __device__ inline CoordType maximum(CoordType first, CoordType second) {
   return first > second ? first : second;
 }
 
-// Reverse of fillSharedYBand
 __device__ inline bool yBinInsideBand(std::uint32_t selectedYBin,
                                       CoordType center, CoordType halfWidth,
                                       const HoughAxisRanges& ranges,
                                       std::uint32_t nBinsY) {
-  int yBinDown = HoughDetail::binIndexDevice(ranges.yMin, ranges.yMax, nBinsY,
-                                             center - halfWidth);
-
-  int yBinUp = HoughDetail::binIndexDevice(ranges.yMin, ranges.yMax, nBinsY,
-                                           center + halfWidth);
-
-  if (yBinDown > yBinUp) {
-    const int temporary = yBinDown;
-    yBinDown = yBinUp;
-    yBinUp = temporary;
-  }
-
-  if (yBinDown < 0) {
-    yBinDown = 0;
-  }
-
-  if (yBinUp >= static_cast<int>(nBinsY)) {
-    yBinUp = static_cast<int>(nBinsY) - 1;
-  }
+  const HoughDetail::YBinRange band =
+      HoughDetail::yBinRange(ranges, nBinsY, center, halfWidth);
 
   const int selected = static_cast<int>(selectedYBin);
-  return selected >= yBinDown && selected <= yBinUp;
+  return selected >= band.down && selected <= band.up;
 }
 
 __device__ inline bool etaHitContributesToMaximum(
@@ -229,9 +211,16 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
   auto* sharedLayerMask =
       reinterpret_cast<LayerMask*>(sharedMemory + layerMaskOffset);
 
-  const std::size_t candidateOffset =
+  const std::size_t associatedHitsOffset =
       HoughDetail::alignUp(layerMaskOffset + nCells * sizeof(LayerMask),
-                           alignof(PeakFinders::GlobalMaximumCandidate));
+                           alignof(std::uint32_t));
+
+  auto* sharedAssociatedHits = reinterpret_cast<std::uint32_t*>(
+      sharedMemory + associatedHitsOffset);
+
+  const std::size_t candidateOffset = HoughDetail::alignUp(
+      associatedHitsOffset + nCells * sizeof(std::uint32_t),
+      alignof(PeakFinders::GlobalMaximumCandidate));
 
   auto* sharedCandidates =
       reinterpret_cast<PeakFinders::GlobalMaximumCandidate*>(sharedMemory +
@@ -250,6 +239,7 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
       sharedHits[localBin] = YieldType{0.0};
       sharedLayers[localBin] = YieldType{0.0};
       sharedLayerMask[localBin] = LayerMask{0ull};
+      sharedAssociatedHits[localBin] = 0u;
     }
 
     __syncthreads();
@@ -261,18 +251,14 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
     const std::uint32_t nHits = bucketEnd - bucketStart;
 
-    constexpr std::uint32_t nSolutions = 2u;
-
-    const std::uint32_t nTasks = nHits * plane.nBinsX * nSolutions;
+    const std::uint32_t nTasks = nHits * plane.nBinsX;
 
     // 2.4 Start thread stride loop
     for (std::uint32_t task = threadIdx.x; task < nTasks; task += blockDim.x) {
       // 2.5.1 Calculate the variables
-      const std::uint32_t solution = task % nSolutions;
+      const std::uint32_t xBin = task % plane.nBinsX;
 
-      const std::uint32_t xBin = (task / nSolutions) % plane.nBinsX;
-
-      const std::uint32_t localHit = task / (nSolutions * plane.nBinsX);
+      const std::uint32_t localHit = task / plane.nBinsX;
 
       const std::uint32_t hitIndex = bucketStart + localHit;
 
@@ -285,11 +271,14 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
       const CoordType radius = spacePoints.driftRadius[hitIndex];
 
-      const CoordType sign = solution == 0u ? CoordType{-1.0} : CoordType{1.0};
+      const CoordType centralIntercept = y - tanTheta * z;
 
-      const CoordType intercept =
-          y - tanTheta * z +
-          sign * radius * sqrt(CoordType{1.0} + tanTheta * tanTheta);
+      const CoordType projectedRadius =
+          radius * sqrt(CoordType{1.0} + tanTheta * tanTheta);
+
+      const CoordType negativeIntercept = centralIntercept - projectedRadius;
+
+      const CoordType positiveIntercept = centralIntercept + projectedRadius;
 
       const CoordType covariance = spacePoints.covariance1[hitIndex];
 
@@ -298,10 +287,22 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
       const CoordType width = etaYHalfWidth(ranges, plane.nBinsX, z, radius,
                                             covariance, widthScale, maxWidth);
 
-      // 2.5.2 Fill the band
-      HoughDetail::fillSharedYBand(sharedHits, sharedLayers, sharedLayerMask,
-                                   plane, ranges, xBin, intercept, width, layer,
-                                   weight);
+      // 2.5.2 Fill both solution bands. The accumulator deliberately counts
+      // both contributions, including an overlap between the two bands.
+      const HoughDetail::YBinRange negativeBand =
+          HoughDetail::fillSharedYBand(
+              sharedHits, sharedLayers, sharedLayerMask, plane, ranges, xBin,
+              negativeIntercept, width, layer, weight);
+      const HoughDetail::YBinRange positiveBand =
+          HoughDetail::fillSharedYBand(
+              sharedHits, sharedLayers, sharedLayerMask, plane, ranges, xBin,
+              positiveIntercept, width, layer, weight);
+
+      // Association counts are different: one input hit contributes at most
+      // once to a cell, even when both drift-circle solutions cover it.
+      HoughDetail::countSharedDistinctYBands(
+          sharedAssociatedHits, plane.nBinsX, xBin, negativeBand,
+          positiveBand);
     }
 
     __syncthreads();
@@ -313,7 +314,8 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
     // 2.7 Append maximum to list of maximums of bucket
     if (threadIdx.x == 0u) {
       PeakFinders::appendEtaMaximum(maxima, plane, ranges, sharedLayers,
-                                    sharedLayerMask, bucket, peak);
+                                    sharedLayerMask, sharedAssociatedHits,
+                                    bucket, peak);
     }
 
     __syncthreads();
@@ -332,64 +334,6 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
     }
 
     __syncthreads();
-  }
-}
-
-__global__ void countEtaMaximumHitsKernel(CudaHoughPlaneBatchArrays plane,
-                                          CudaMuonSpacePointArrays spacePoints,
-                                          CudaHoughMaximumBatchArrays maxima,
-                                          HoughAxisRanges baseRanges,
-                                          CoordType widthScale,
-                                          CoordType maxWidth) {
-  const std::uint32_t maximumIndex = blockIdx.x;
-  const std::uint32_t totalMaximumSlots =
-      maxima.nBuckets * maxima.capacityPerBucket;
-
-  if (maximumIndex >= totalMaximumSlots) {
-    return;
-  }
-
-  const std::uint32_t bucket = maximumIndex / maxima.capacityPerBucket;
-
-  const std::uint32_t maximum = maximumIndex % maxima.capacityPerBucket;
-
-  if (maximum >= maxima.nMaxima[bucket]) {
-    if (threadIdx.x == 0u) {
-      maxima.nAssociatedHits[maximumIndex] = 0u;
-    }
-    return;
-  }
-
-  __shared__ std::uint32_t sharedCount;
-
-  if (threadIdx.x == 0u) {
-    sharedCount = 0u;
-  }
-
-  __syncthreads();
-
-  const std::uint32_t bucketStart = spacePoints.bucketStart[bucket];
-  const std::uint32_t bucketEnd = spacePoints.bucketEnd[bucket];
-
-  std::uint32_t localCount = 0u;
-
-  for (std::uint32_t hitIndex = bucketStart + threadIdx.x; hitIndex < bucketEnd;
-       hitIndex += blockDim.x) {
-    if (etaHitContributesToMaximum(plane, spacePoints, maxima, baseRanges,
-                                   widthScale, maxWidth, bucket, maximum,
-                                   hitIndex)) {
-      ++localCount;
-    }
-  }
-
-  if (localCount != 0u) {
-    atomicAdd(&sharedCount, localCount);
-  }
-
-  __syncthreads();
-
-  if (threadIdx.x == 0u) {
-    maxima.nAssociatedHits[maximumIndex] = sharedCount;
   }
 }
 
@@ -553,12 +497,6 @@ void etaHoughTransformImpl(CudaHoughPlaneBatch& plane,
 
   ACTS_CUDA_CHECK(cudaGetLastError());
 
-  countEtaMaximumHitsKernel<<<static_cast<unsigned>(totalMaximumSlots),
-                              static_cast<unsigned>(threadsPerBlock)>>>(
-      plane.deviceArrays(), spacePoints.deviceArrays(), maxima, axisRanges,
-      etaWidthScale, etaMaxWidth);
-
-  ACTS_CUDA_CHECK(cudaGetLastError());
   ACTS_CUDA_CHECK(cudaDeviceSynchronize());
 }
 

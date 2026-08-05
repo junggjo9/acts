@@ -72,6 +72,36 @@ __device__ inline int binIndexDevice(double min, double max, unsigned nSteps,
   return static_cast<int>((val - min) / (max - min) * nSteps);
 }
 
+struct YBinRange {
+  int down = 0;
+  int up = -1;
+};
+
+/// Return the clamped bin range covered by a top-hat Y band.
+__device__ inline YBinRange yBinRange(
+    const HoughAxisRanges ranges, std::uint32_t nBinsY, CoordType yCenter,
+    CoordType yHalfWidth) {
+  int down = binIndexDevice(ranges.yMin, ranges.yMax, nBinsY,
+                            yCenter - yHalfWidth);
+  int up = binIndexDevice(ranges.yMin, ranges.yMax, nBinsY,
+                          yCenter + yHalfWidth);
+
+  if (down > up) {
+    const int temporary = down;
+    down = up;
+    up = temporary;
+  }
+
+  if (down < 0) {
+    down = 0;
+  }
+  if (up >= static_cast<int>(nBinsY)) {
+    up = static_cast<int>(nBinsY) - 1;
+  }
+
+  return {down, up};
+}
+
 /// @brief Fill one bin in shared memory
 /// @param sharedHits: pointer to shared mem with num of hits
 /// @param sharedLayers: pointer to shared mem with num of layers
@@ -109,36 +139,47 @@ __device__ inline void fillSharedBin(YieldType* sharedHits,
 }
 
 /// @brief Fill bins in Y-column
-__device__ inline void fillSharedYBand(
+__device__ inline YBinRange fillSharedYBand(
     YieldType* sharedHits, YieldType* sharedLayers, LayerMask* sharedLayerMask,
     const CudaHoughPlaneBatchArrays plane, const HoughAxisRanges ranges,
     std::uint32_t xBin, CoordType yCenter, CoordType yHalfWidth, unsigned layer,
     YieldType weight) {
-  int yBinDown = binIndexDevice(ranges.yMin, ranges.yMax, plane.nBinsY,
-                                yCenter - yHalfWidth);
-
-  int yBinUp = binIndexDevice(ranges.yMin, ranges.yMax, plane.nBinsY,
-                              yCenter + yHalfWidth);
-
-  // Necessary checks
-  if (yBinDown > yBinUp) {
-    const int temporary = yBinDown;
-    yBinDown = yBinUp;
-    yBinUp = temporary;
-  }
-
-  if (yBinDown < 0) {
-    yBinDown = 0;
-  }
-
-  if (yBinUp >= static_cast<int>(plane.nBinsY)) {
-    yBinUp = static_cast<int>(plane.nBinsY) - 1;
-  }
+  const YBinRange band =
+      yBinRange(ranges, plane.nBinsY, yCenter, yHalfWidth);
 
   // Top hat add, so 1 for all values
-  for (int yBin = yBinDown; yBin <= yBinUp; ++yBin) {
+  for (int yBin = band.down; yBin <= band.up; ++yBin) {
     fillSharedBin(sharedHits, sharedLayers, sharedLayerMask, plane.nBinsX, xBin,
                   static_cast<std::uint32_t>(yBin), layer, weight);
+  }
+
+  return band;
+}
+
+/// @brief Count one hit in the union of two Y bands.
+///
+/// The two drift-circle solutions are filled independently in the Hough
+/// accumulator, but hit association treats them as alternatives: a hit is
+/// associated with a cell when either solution covers it. This helper is
+/// called once per hit/X-bin pair and increments every covered cell exactly
+/// once, including where the two bands overlap.
+__device__ inline void countSharedDistinctYBands(
+    std::uint32_t* sharedAssociatedHits, std::uint32_t nBinsX,
+    std::uint32_t xBin, YBinRange first, YBinRange second) {
+  for (int yBin = first.down; yBin <= first.up; ++yBin) {
+    const std::uint32_t localBin =
+        static_cast<std::uint32_t>(yBin) * nBinsX + xBin;
+    atomicAdd(&sharedAssociatedHits[localBin], 1u);
+  }
+
+  // Only count the parts of the second band not already covered by the first.
+  for (int yBin = second.down; yBin <= second.up; ++yBin) {
+    if (yBin >= first.down && yBin <= first.up) {
+      continue;
+    }
+    const std::uint32_t localBin =
+        static_cast<std::uint32_t>(yBin) * nBinsX + xBin;
+    atomicAdd(&sharedAssociatedHits[localBin], 1u);
   }
 }
 
@@ -238,7 +279,8 @@ __device__ inline std::uint32_t reserveMaximumSlot(
 /// @param plane: ptr to global SoA of plane
 /// @param ranges: range of bucket
 /// @param sharedLayers: ptr to shared mem of Layers
-/// @param sharedLayers: ptr to shared mem of Layers bit Mask
+/// @param sharedLayerMask: ptr to shared mem of Layers bit Mask
+/// @param sharedAssociatedHits: ptr to shared mem of unique hit counts
 /// @param bucket: bucket idx
 /// @param candidate: Hough Maximum object to append
 ///
@@ -248,7 +290,8 @@ __device__ inline std::uint32_t reserveMaximumSlot(
 __device__ inline bool appendEtaMaximum(
     CudaHoughMaximumBatchArrays maxima, const CudaHoughPlaneBatchArrays plane,
     const HoughAxisRanges ranges, const YieldType* sharedLayers,
-    const LayerMask* sharedLayerMask, std::uint32_t bucket,
+    const LayerMask* sharedLayerMask,
+    const std::uint32_t* sharedAssociatedHits, std::uint32_t bucket,
     const GlobalMaximumCandidate& candidate) {
   if (candidate.nHits <= YieldType{0.0} ||
       candidate.localBin == std::numeric_limits<std::uint32_t>::max()) {
@@ -277,6 +320,8 @@ __device__ inline bool appendEtaMaximum(
   maxima.nLayers[outputIndex] = sharedLayers[candidate.localBin];
 
   maxima.layerMask[outputIndex] = sharedLayerMask[candidate.localBin];
+  maxima.nAssociatedHits[outputIndex] =
+      sharedAssociatedHits[candidate.localBin];
 
   maxima.xBin[outputIndex] = xBin;
   maxima.yBin[outputIndex] = yBin;
@@ -296,6 +341,10 @@ inline std::size_t sharedBytesForEtaHough(std::size_t nCells,
 
   bytes = alignUp(bytes, alignof(LayerMask));
   bytes += nCells * sizeof(LayerMask);
+
+  bytes = alignUp(bytes, alignof(std::uint32_t));
+
+  bytes += nCells * sizeof(std::uint32_t);
 
   bytes = alignUp(bytes, alignof(PeakFinders::GlobalMaximumCandidate));
 
