@@ -6,17 +6,11 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-#include "Acts/Definitions/Units.hpp"
-#include "ActsExamples/EventData/CudaMuonSpacePoint.hpp"
-#include "ActsExamples/Utilities/CudaHoughTransformUtils.cuh"
 #include "ActsExamples/Utilities/CudaHoughTransformUtils.hpp"
 #include "ActsExamples/Utilities/CudaUtilities.hpp"
 
-#include <algorithm>
-#include <cmath>
 #include <limits>
 #include <stdexcept>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -28,53 +22,28 @@ using namespace ActsExamples;
 using ActsExamples::CudaHoughTransformUtils::CoordType;
 using ActsExamples::CudaHoughTransformUtils::CudaHoughPlaneBatchArrays;
 using ActsExamples::CudaHoughTransformUtils::HoughAxisRanges;
-using ActsExamples::CudaHoughTransformUtils::LayerMask;
-using ActsExamples::CudaHoughTransformUtils::YieldType;
-using ActsExamples::CudaHoughTransformUtils::detail::layerBit;
 
 void allocateDeviceData(CudaHoughPlaneBatchArrays& device,
-                        std::size_t totalCells, std::size_t nBuckets) {
-  allocateDeviceColumn(device.nHits, totalCells);
-  allocateDeviceColumn(device.nLayers, totalCells);
-  allocateDeviceColumn(device.layerMask, totalCells);
-
+                        std::size_t nBuckets) {
   allocateDeviceColumn(device.yMin, nBuckets);
   allocateDeviceColumn(device.yMax, nBuckets);
 }
 
 void freeDeviceData(CudaHoughPlaneBatchArrays& device) noexcept {
-  freeDeviceColumn(device.nHits);
-  freeDeviceColumn(device.nLayers);
-  freeDeviceColumn(device.layerMask);
-
   freeDeviceColumn(device.yMin);
   freeDeviceColumn(device.yMax);
 }
 
 void copyHostToDevice(CudaHoughPlaneBatchArrays& device,
-                      const std::vector<YieldType>& hits,
-                      const std::vector<YieldType>& layers,
-                      const std::vector<LayerMask>& layerMask,
                       const std::vector<CoordType>& yMin,
                       const std::vector<CoordType>& yMax) {
-  copyColumnToDevice(device.nHits, hits);
-  copyColumnToDevice(device.nLayers, layers);
-  copyColumnToDevice(device.layerMask, layerMask);
-
   copyColumnToDevice(device.yMin, yMin);
   copyColumnToDevice(device.yMax, yMax);
 }
 
-void copyDeviceToHost(std::vector<YieldType>& hits,
-                      std::vector<YieldType>& layers,
-                      std::vector<LayerMask>& layerMask,
-                      std::vector<CoordType>& yMin,
+void copyDeviceToHost(std::vector<CoordType>& yMin,
                       std::vector<CoordType>& yMax,
                       const CudaHoughPlaneBatchArrays& device) {
-  copyColumnToHost(hits, device.nHits);
-  copyColumnToHost(layers, device.nLayers);
-  copyColumnToHost(layerMask, device.layerMask);
-
   copyColumnToHost(yMin, device.yMin);
   copyColumnToHost(yMax, device.yMax);
 }
@@ -103,10 +72,6 @@ CudaHoughPlaneBatch::CudaHoughPlaneBatch(const HoughPlaneConfig& cfg,
         "CudaHoughPlaneBatch dimensions must fit into std::uint32_t");
   }
 
-  m_hostHits.resize(totalCells(), 0.0f);
-  m_hostLayers.resize(totalCells(), 0.0f);
-  m_hostLayerMask.resize(totalCells(), LayerMask{0ull});
-
   m_hostYMin.resize(nBuckets, 0.0);
   m_hostYMax.resize(nBuckets, 0.0);
 }
@@ -114,9 +79,6 @@ CudaHoughPlaneBatch::CudaHoughPlaneBatch(const HoughPlaneConfig& cfg,
 CudaHoughPlaneBatch::CudaHoughPlaneBatch(CudaHoughPlaneBatch&& other) noexcept
     : m_cfg{other.m_cfg},
       m_nBuckets{other.m_nBuckets},
-      m_hostHits{std::move(other.m_hostHits)},
-      m_hostLayers{std::move(other.m_hostLayers)},
-      m_hostLayerMask{std::move(other.m_hostLayerMask)},
       m_hostYMin{std::move(other.m_hostYMin)},
       m_hostYMax{std::move(other.m_hostYMax)},
       m_device{std::exchange(other.m_device, {})},
@@ -132,9 +94,6 @@ CudaHoughPlaneBatch& CudaHoughPlaneBatch::operator=(
 
     m_cfg = other.m_cfg;
     m_nBuckets = other.m_nBuckets;
-    m_hostHits = std::move(other.m_hostHits);
-    m_hostLayers = std::move(other.m_hostLayers);
-    m_hostLayerMask = std::move(other.m_hostLayerMask);
     m_hostYMin = std::move(other.m_hostYMin);
     m_hostYMax = std::move(other.m_hostYMax);
     m_device = std::exchange(other.m_device, {});
@@ -150,152 +109,6 @@ CudaHoughPlaneBatch::~CudaHoughPlaneBatch() noexcept {
   clearDevice();
 }
 
-CudaHoughPlaneBatch::size_type CudaHoughPlaneBatch::globalBin(
-    size_type bucket, size_type xBin, size_type yBin) const {
-  checkBucket(bucket);
-  checkIndices(xBin, yBin);
-  return uncheckedGlobalBin(bucket, xBin, yBin);
-}
-
-void CudaHoughPlaneBatch::fillBin(size_type bucket, size_type xBin,
-                                  size_type yBin, unsigned layer,
-                                  YieldType weight) {
-  checkBucket(bucket);
-  checkIndices(xBin, yBin);
-
-  if (weight == 0.0f) {
-    return;
-  }
-
-  const size_type bin = uncheckedGlobalBin(bucket, xBin, yBin);
-
-  m_hostHits[bin] += weight;
-
-  const LayerMask bit = layerBit(layer);
-
-  if ((m_hostLayerMask[bin] & bit) == LayerMask{0ull}) {
-    m_hostLayerMask[bin] |= bit;
-    m_hostLayers[bin] += weight;
-  }
-}
-
-std::pair<std::size_t, std::size_t> CudaHoughPlaneBatch::axisBins(
-    size_type globalBin) const {
-  const size_type localBin = globalBin % nCellsPerBucket();
-  return {localBin % nBinsX(), localBin / nBinsX()};
-}
-
-YieldType CudaHoughPlaneBatch::nHits(size_type bucket, size_type xBin,
-                                     size_type yBin) const {
-  return m_hostHits[globalBin(bucket, xBin, yBin)];
-}
-
-YieldType CudaHoughPlaneBatch::nLayers(size_type bucket, size_type xBin,
-                                       size_type yBin) const {
-  return m_hostLayers[globalBin(bucket, xBin, yBin)];
-}
-
-LayerMask CudaHoughPlaneBatch::layerMask(size_type bucket, size_type xBin,
-                                         size_type yBin) const {
-  return m_hostLayerMask[globalBin(bucket, xBin, yBin)];
-}
-
-bool CudaHoughPlaneBatch::hasLayer(size_type bucket, size_type xBin,
-                                   size_type yBin, unsigned layer) const {
-  if (layer >= 8u * sizeof(LayerMask)) {
-    return false;
-  }
-
-  const LayerMask bit = LayerMask{1ull} << layer;
-  return (layerMask(bucket, xBin, yBin) & bit) != LayerMask{0ull};
-}
-
-std::vector<unsigned> CudaHoughPlaneBatch::layers(size_type bucket,
-                                                  size_type xBin,
-                                                  size_type yBin) const {
-  const LayerMask mask = layerMask(bucket, xBin, yBin);
-
-  std::vector<unsigned> out{};
-
-  for (unsigned layer = 0; layer < 8u * sizeof(LayerMask); ++layer) {
-    const LayerMask bit = LayerMask{1ull} << layer;
-
-    if ((mask & bit) != LayerMask{0ull}) {
-      out.push_back(layer);
-    }
-  }
-
-  return out;
-}
-
-YieldType CudaHoughPlaneBatch::maxHits(size_type bucket) const {
-  checkBucket(bucket);
-
-  const size_type bucket_offset = bucket * nCellsPerBucket();
-  YieldType max_hits = 0;
-
-  for (size_type local_bin = 0; local_bin < nCellsPerBucket(); ++local_bin) {
-    max_hits = std::max(max_hits, m_hostHits[bucket_offset + local_bin]);
-  }
-
-  return max_hits;
-}
-
-YieldType CudaHoughPlaneBatch::maxLayers(size_type bucket) const {
-  checkBucket(bucket);
-
-  const size_type bucket_offset = bucket * nCellsPerBucket();
-  YieldType max_layers = 0;
-
-  for (size_type local_bin = 0; local_bin < nCellsPerBucket(); ++local_bin) {
-    max_layers = std::max(max_layers, m_hostLayers[bucket_offset + local_bin]);
-  }
-
-  return max_layers;
-}
-
-std::pair<std::size_t, std::size_t> CudaHoughPlaneBatch::locMaxHits(
-    size_type bucket) const {
-  checkBucket(bucket);
-
-  const size_type bucket_offset = bucket * nCellsPerBucket();
-
-  YieldType max_hits = 0;
-  size_type max_local_bin = 0;
-
-  for (size_type local_bin = 0; local_bin < nCellsPerBucket(); ++local_bin) {
-    const YieldType hits = m_hostHits[bucket_offset + local_bin];
-
-    if (hits > max_hits) {
-      max_hits = hits;
-      max_local_bin = local_bin;
-    }
-  }
-
-  const size_type x_bin = max_local_bin % nBinsX();
-  const size_type y_bin = max_local_bin / nBinsX();
-
-  return {x_bin, y_bin};
-}
-
-std::pair<std::size_t, std::size_t> CudaHoughPlaneBatch::locMaxLayers(
-    size_type bucket) const {
-  checkBucket(bucket);
-
-  const size_type bucketOffset = bucket * nCellsPerBucket();
-
-  size_type maximumLocalBin = 0u;
-
-  for (size_type localBin = 1u; localBin < nCellsPerBucket(); ++localBin) {
-    if (m_hostLayers[bucketOffset + localBin] >
-        m_hostLayers[bucketOffset + maximumLocalBin]) {
-      maximumLocalBin = localBin;
-    }
-  }
-
-  return {maximumLocalBin % nBinsX(), maximumLocalBin / nBinsX()};
-}
-
 void CudaHoughPlaneBatch::moveToDevice() {
   clearDevice();
 
@@ -303,9 +116,8 @@ void CudaHoughPlaneBatch::moveToDevice() {
   m_device.nBinsX = static_cast<std::uint32_t>(nBinsX());
   m_device.nBinsY = static_cast<std::uint32_t>(nBinsY());
 
-  allocateDeviceData(m_device, totalCells(), nBuckets());
-  copyHostToDevice(m_device, m_hostHits, m_hostLayers, m_hostLayerMask,
-                   m_hostYMin, m_hostYMax);
+  allocateDeviceData(m_device, nBuckets());
+  copyHostToDevice(m_device, m_hostYMin, m_hostYMax);
 
   m_onDevice = true;
 }
@@ -315,8 +127,7 @@ void CudaHoughPlaneBatch::moveToHost() {
     return;
   }
 
-  copyDeviceToHost(m_hostHits, m_hostLayers, m_hostLayerMask, m_hostYMin,
-                   m_hostYMax, m_device);
+  copyDeviceToHost(m_hostYMin, m_hostYMax, m_device);
 }
 
 void CudaHoughPlaneBatch::clearDevice() noexcept {
@@ -328,16 +139,6 @@ void CudaHoughPlaneBatch::clearDevice() noexcept {
 void CudaHoughPlaneBatch::checkBucket(size_type bucket) const {
   if (bucket >= nBuckets()) {
     throw std::out_of_range("CudaHoughPlaneBatch bucket index out of range");
-  }
-}
-
-void CudaHoughPlaneBatch::checkIndices(size_type xBin, size_type yBin) const {
-  if (xBin >= nBinsX()) {
-    throw std::out_of_range("CudaHoughPlaneBatch x-bin index out of range");
-  }
-
-  if (yBin >= nBinsY()) {
-    throw std::out_of_range("CudaHoughPlaneBatch y-bin index out of range");
   }
 }
 

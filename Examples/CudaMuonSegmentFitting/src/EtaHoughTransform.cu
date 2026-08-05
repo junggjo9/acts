@@ -319,21 +319,6 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
     }
 
     __syncthreads();
-
-    // 2.8 Save the full Hough plane into global memory
-    // Can be later omitted
-    const std::uint32_t globalBase = bucket * nCells;
-
-    for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
-         localBin += blockDim.x) {
-      plane.nHits[globalBase + localBin] = sharedHits[localBin];
-
-      plane.nLayers[globalBase + localBin] = sharedLayers[localBin];
-
-      plane.layerMask[globalBase + localBin] = sharedLayerMask[localBin];
-    }
-
-    __syncthreads();
   }
 }
 

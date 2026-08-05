@@ -28,7 +28,6 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
-#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -551,37 +550,6 @@ ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
   return makeBatchedDriftCircleContainer(nBuckets, driftCircleInputs());
 }
 
-// Export the small deterministic accumulator for external visual inspection.
-// This helper is not used for the large validation samples.
-void writeHoughHistogramCsv(
-    const std::filesystem::path& path, const CudaHT::CudaHoughPlaneBatch& plane,
-    const Acts::HoughTransformUtils::HoughAxisRanges& axisRanges) {
-  std::ofstream out{path};
-  BOOST_REQUIRE_MESSAGE(out, "Failed to open " << path.string());
-
-  out << std::setprecision(17);
-  out << "xBin,yBin,tanTheta,interceptY,nHits,nLayers,layerMask\n";
-
-  // Only one bucket that is 0th
-  std::uint32_t bucketId = 0;
-
-  for (std::size_t yBin = 0; yBin < plane.nBinsY(); ++yBin) {
-    for (std::size_t xBin = 0; xBin < plane.nBinsX(); ++xBin) {
-      const double tanTheta = Acts::HoughTransformUtils::binCenter(
-          axisRanges.xMin, axisRanges.xMax, plane.nBinsX(), xBin);
-      const double interceptY = Acts::HoughTransformUtils::binCenter(
-          axisRanges.yMin, axisRanges.yMax, plane.nBinsY(), yBin);
-
-      out << xBin << "," << yBin << "," << tanTheta << "," << interceptY << ","
-          << plane.nHits(bucketId, xBin, yBin) << ","
-          << plane.nLayers(bucketId, xBin, yBin) << ","
-          << static_cast<unsigned long long>(
-                 plane.layerMask(bucketId, xBin, yBin))
-          << "\n";
-    }
-  }
-}
-
 std::uint32_t rawMuonIdLayer(std::uint32_t rawId) {
   // Particle Gun muon IDs encode the zero-based logical layer in bits 17--20.
   static constexpr std::uint32_t fourBit = 0xFu;
@@ -629,7 +597,7 @@ void runEtaValidation(EtaValidationBatch& batch,
   // 1. Validate truth metadata before launching CUDA so data-preparation
   // failures remain distinct from transform failures.
   constexpr std::uint32_t minimumSeedHits = 4u;
-  constexpr std::size_t maximumCapacityPerBucket = 16u;
+  constexpr std::size_t maximumCapacityPerBucket = 1u;
 
   const std::size_t nBuckets = batch.buckets.size();
 
@@ -670,15 +638,24 @@ void runEtaValidation(EtaValidationBatch& batch,
   BOOST_REQUIRE_MESSAGE(!outputFile.IsZombie(),
                         "Failed to create " << outputPath.string());
 
-  auto bucketTree = std::make_unique<TTree>("EtaHoughBucketTree", "BucketTree");
-  auto hitTree = std::make_unique<TTree>("EtaHoughHitTree", "HitTree");
-  auto truthTree = std::make_unique<TTree>("EtaHoughTruthTree", "TruthTree");
-  auto maximumTree = std::make_unique<TTree>("EtaHoughTree", "MaximumTree");
+  TTree bucketTree{"EtaHoughBucketTree", "BucketTree"};
+  TTree hitTree{"EtaHoughHitTree", "HitTree"};
+  TTree truthTree{"EtaHoughTruthTree", "TruthTree"};
+  TTree maximumTree{"EtaHoughTree", "MaximumTree"};
 
-  bucketTree->SetDirectory(nullptr);
-  hitTree->SetDirectory(nullptr);
-  truthTree->SetDirectory(nullptr);
-  maximumTree->SetDirectory(nullptr);
+  bucketTree.SetDirectory(&outputFile);
+  hitTree.SetDirectory(&outputFile);
+  truthTree.SetDirectory(&outputFile);
+  maximumTree.SetDirectory(&outputFile);
+
+  // Keep baskets well below ROOT's 1 GB object-buffer limit and stream them
+  // into the file throughout filling instead of retaining the complete trees
+  // in memory until the end.
+  constexpr Long64_t autoFlushBytes = 64ll * 1024ll * 1024ll;
+  bucketTree.SetAutoFlush(-autoFlushBytes);
+  hitTree.SetAutoFlush(-autoFlushBytes);
+  truthTree.SetAutoFlush(-autoFlushBytes);
+  maximumTree.SetAutoFlush(-autoFlushBytes);
   std::uint32_t bucketNumber = 0u;
   std::uint32_t eventId = 0u;
   std::uint16_t sourceBucketId = 0u;
@@ -688,12 +665,12 @@ void runEtaValidation(EtaValidationBatch& batch,
 
   // Branch binds a ROOT column to a C++ variable address. Each later Fill()
   // snapshots the variables' current values as one new tree row.
-  bucketTree->Branch("bucketNumber", &bucketNumber);
-  bucketTree->Branch("eventId", &eventId);
-  bucketTree->Branch("sourceBucketId", &sourceBucketId);
-  bucketTree->Branch("nInputHits", &nInputHits);
-  bucketTree->Branch("nTruthSegments", &nTruthSegments);
-  bucketTree->Branch("nMaxima", &nMaxima);
+  bucketTree.Branch("bucketNumber", &bucketNumber);
+  bucketTree.Branch("eventId", &eventId);
+  bucketTree.Branch("sourceBucketId", &sourceBucketId);
+  bucketTree.Branch("nInputHits", &nInputHits);
+  bucketTree.Branch("nTruthSegments", &nTruthSegments);
+  bucketTree.Branch("nMaxima", &nMaxima);
 
   std::uint32_t localHitIndex = 0u;
   double localX = 0.0;
@@ -704,14 +681,14 @@ void runEtaValidation(EtaValidationBatch& batch,
   std::uint32_t logicalLayer = 0u;
 
   // Hit-tree columns. bucketNumber + localHitIndex uniquely identify a hit.
-  hitTree->Branch("bucketNumber", &bucketNumber);
-  hitTree->Branch("localHitIndex", &localHitIndex);
-  hitTree->Branch("localX", &localX);
-  hitTree->Branch("localY", &localY);
-  hitTree->Branch("localZ", &localZ);
-  hitTree->Branch("driftRadius", &driftRadius);
-  hitTree->Branch("covarianceY", &covarianceY);
-  hitTree->Branch("logicalLayer", &logicalLayer);
+  hitTree.Branch("bucketNumber", &bucketNumber);
+  hitTree.Branch("localHitIndex", &localHitIndex);
+  hitTree.Branch("localX", &localX);
+  hitTree.Branch("localY", &localY);
+  hitTree.Branch("localZ", &localZ);
+  hitTree.Branch("driftRadius", &driftRadius);
+  hitTree.Branch("covarianceY", &covarianceY);
+  hitTree.Branch("logicalLayer", &logicalLayer);
 
   std::uint32_t truthNumber = 0u;
   std::uint32_t segmentIndex = 0u;
@@ -721,15 +698,15 @@ void runEtaValidation(EtaValidationBatch& batch,
   std::vector<std::uint32_t> truthHitIndices{};
 
   // Truth-tree columns. std::vector creates a variable-length ROOT branch.
-  truthTree->Branch("truthNumber", &truthNumber);
-  truthTree->Branch("bucketNumber", &bucketNumber);
-  truthTree->Branch("eventId", &eventId);
-  truthTree->Branch("sourceBucketId", &sourceBucketId);
-  truthTree->Branch("segmentIndex", &segmentIndex);
-  truthTree->Branch("nTruthHits", &nTruthHits);
-  truthTree->Branch("trueTanBeta", &trueTanBeta);
-  truthTree->Branch("trueY0", &trueY0);
-  truthTree->Branch("truthHitIndices", &truthHitIndices);
+  truthTree.Branch("truthNumber", &truthNumber);
+  truthTree.Branch("bucketNumber", &bucketNumber);
+  truthTree.Branch("eventId", &eventId);
+  truthTree.Branch("sourceBucketId", &sourceBucketId);
+  truthTree.Branch("segmentIndex", &segmentIndex);
+  truthTree.Branch("nTruthHits", &nTruthHits);
+  truthTree.Branch("trueTanBeta", &trueTanBeta);
+  truthTree.Branch("trueY0", &trueY0);
+  truthTree.Branch("truthHitIndices", &truthHitIndices);
 
   std::uint32_t maximumId = 0u;
   std::uint32_t nAssociatedHits = 0u;
@@ -741,15 +718,15 @@ void runEtaValidation(EtaValidationBatch& batch,
   std::vector<std::uint32_t> associatedHitIndices{};
 
   // Maximum-tree columns, including bucket-local associated hit indices.
-  maximumTree->Branch("bucketNumber", &bucketNumber);
-  maximumTree->Branch("maximumId", &maximumId);
-  maximumTree->Branch("nAssociatedHits", &nAssociatedHits);
-  maximumTree->Branch("nHits", &nHits);
-  maximumTree->Branch("nLayers", &nLayers);
-  maximumTree->Branch("recoTanBeta", &recoTanBeta);
-  maximumTree->Branch("recoY0", &recoY0);
-  maximumTree->Branch("enoughHits", &enoughHits);
-  maximumTree->Branch("associatedHitIndices", &associatedHitIndices);
+  maximumTree.Branch("bucketNumber", &bucketNumber);
+  maximumTree.Branch("maximumId", &maximumId);
+  maximumTree.Branch("nAssociatedHits", &nAssociatedHits);
+  maximumTree.Branch("nHits", &nHits);
+  maximumTree.Branch("nLayers", &nLayers);
+  maximumTree.Branch("recoTanBeta", &recoTanBeta);
+  maximumTree.Branch("recoY0", &recoY0);
+  maximumTree.Branch("enoughHits", &enoughHits);
+  maximumTree.Branch("associatedHitIndices", &associatedHitIndices);
 
   // 4. Fill bucket, hit, and maximum trees together while bucket-local ranges
   // and CUDA maximum indices are readily available.
@@ -762,7 +739,7 @@ void runEtaValidation(EtaValidationBatch& batch,
         batch.spacePoints.bucketStart(bucket));
     nTruthSegments = batch.buckets[bucket].nTruthSegments;
     nMaxima = static_cast<std::uint32_t>(maxima.nMaxima(bucket));
-    bucketTree->Fill();
+    bucketTree.Fill();
 
     const std::size_t bucketStart = batch.spacePoints.bucketStart(bucket);
     const std::size_t bucketEnd = batch.spacePoints.bucketEnd(bucket);
@@ -777,7 +754,7 @@ void runEtaValidation(EtaValidationBatch& batch,
       driftRadius = spacePoint->driftRadius();
       covarianceY = spacePoint->covariance()[1];
       logicalLayer = rawMuonIdLayer(batch.spacePoints.muonId(hit));
-      hitTree->Fill();
+      hitTree.Fill();
     }
 
     for (std::size_t maximum = 0u; maximum < maxima.nMaxima(bucket);
@@ -805,7 +782,7 @@ void runEtaValidation(EtaValidationBatch& batch,
             static_cast<std::uint32_t>(globalHitIndex - bucketStart));
       }
       BOOST_REQUIRE_EQUAL(associatedHitIndices.size(), nAssociatedHits);
-      maximumTree->Fill();
+      maximumTree.Fill();
     }
 
   }
@@ -813,7 +790,7 @@ void runEtaValidation(EtaValidationBatch& batch,
   // 5. Truth is independent of the number of maxima, so fill its tree once
   // from the input truth collection after processing all buckets.
   for (const EtaValidationTruth& truth : batch.truth) {
-    truthNumber = static_cast<std::uint32_t>(truthTree->GetEntries());
+    truthNumber = static_cast<std::uint32_t>(truthTree.GetEntries());
     bucketNumber = truth.validationBucketId;
     eventId = truth.eventId;
     sourceBucketId = truth.sourceBucketId;
@@ -822,14 +799,14 @@ void runEtaValidation(EtaValidationBatch& batch,
     trueTanBeta = truth.tanBeta;
     trueY0 = truth.y0;
     truthHitIndices = truth.truthHitIndices;
-    truthTree->Fill();
+    truthTree.Fill();
   }
 
-  // 6. Persist the four in-memory trees into the TFile and close it explicitly.
-  outputFile.WriteObject(bucketTree.get(), bucketTree->GetName());
-  outputFile.WriteObject(hitTree.get(), hitTree->GetName());
-  outputFile.WriteObject(truthTree.get(), truthTree->GetName());
-  outputFile.WriteObject(maximumTree.get(), maximumTree->GetName());
+  // 6. Write the tree headers; their baskets have already been streamed.
+  bucketTree.Write();
+  hitTree.Write();
+  truthTree.Write();
+  maximumTree.Write();
   outputFile.Close();
 
   BOOST_TEST_MESSAGE("Wrote validation data to " << outputPath.string());
@@ -838,8 +815,8 @@ void runEtaValidation(EtaValidationBatch& batch,
 }  // namespace
 
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
-  // Small white-box test: compare the reported maximum with the maximum found
-  // by inspecting the copied accumulator, then export both for visualization.
+  // Small deterministic test of the maximum returned from the transient
+  // shared-memory accumulator.
   auto spacePoints = makeBatchedDriftCircleContainer(1);
 
   constexpr double expectedTanTheta = -0.0401472 / 0.994974;
@@ -871,25 +848,11 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
 
   const double foundInterceptY = maxima.interceptY(bucketId, maximumId);
 
-  const auto [planeXBin, planeYBin] = plane.locMaxHits(bucketId);
-
   BOOST_TEST_MESSAGE("Maximum bin: x=" << xBin << ", y=" << yBin);
   BOOST_TEST_MESSAGE("Maximum parameters: tanTheta="
                      << foundTanTheta << ", interceptY=" << foundInterceptY);
   BOOST_TEST_MESSAGE("Maximum hits: " << maxima.nHits(bucketId, maximumId));
   BOOST_TEST_MESSAGE("Maximum layers: " << maxima.nLayers(bucketId, maximumId));
-
-  BOOST_CHECK_EQUAL(xBin, planeXBin);
-  BOOST_CHECK_EQUAL(yBin, planeYBin);
-
-  BOOST_CHECK_EQUAL(maxima.nHits(bucketId, maximumId),
-                    plane.nHits(bucketId, xBin, yBin));
-
-  BOOST_CHECK_EQUAL(maxima.nLayers(bucketId, maximumId),
-                    plane.nLayers(bucketId, xBin, yBin));
-
-  BOOST_CHECK_EQUAL(maxima.layerMask(bucketId, maximumId),
-                    plane.layerMask(bucketId, xBin, yBin));
 
   const auto bucketRanges = plane.bucketAxisRanges(bucketId, axisRanges);
 
@@ -916,16 +879,9 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
   const std::filesystem::path hitsCsv =
       outputDirectory / "cuda_hough_visual_hits.csv";
 
-  const std::filesystem::path histogramCsv =
-      outputDirectory / "cuda_hough_visual_histogram.csv";
-
   writeFirstBucketHitsCsv(hitsCsv, spacePoints);
-  writeHoughHistogramCsv(histogramCsv, plane, bucketRanges);
 
   BOOST_TEST_MESSAGE("Wrote Hough visual debug hits to: " << hitsCsv.string());
-
-  BOOST_TEST_MESSAGE(
-      "Wrote Hough visual debug histogram to: " << histogramCsv.string());
 }
 
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_counts_overlapping_solutions_once) {
@@ -944,12 +900,10 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_counts_overlapping_solutions_once) {
       plane, spacePoints, axisRanges);
 
   maxima.moveToHost();
-  plane.moveToHost();
   maxima.copyAssociatedHitIndicesToHost();
 
   BOOST_REQUIRE_EQUAL(maxima.nMaxima(0u), 1u);
   BOOST_CHECK_EQUAL(maxima.nHits(0u, 0u), 2.0f);
-  BOOST_CHECK_EQUAL(plane.nHits(0u, 0u, 0u), 2.0f);
   BOOST_CHECK_EQUAL(maxima.nAssociatedHits(0u, 0u), 1u);
 
   const auto associated = maxima.associatedHitIndices(0u, 0u);
