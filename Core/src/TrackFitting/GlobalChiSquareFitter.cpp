@@ -13,22 +13,29 @@
 void Acts::Experimental::updateGx2fParams(
     BoundTrackParameters& params, const Eigen::VectorXd& deltaParamsExtended,
     const std::size_t nMaterialSurfaces,
-    std::unordered_map<GeometryIdentifier, ScatteringProperties>& scatteringMap,
-    const std::vector<GeometryIdentifier>& geoIdVector) {
+    std::unordered_map<GeometryIdentifier, MaterialProperties>& materialMap,
+    const std::vector<GeometryIdentifier>& geoIdVector, const bool energyLoss) {
   // update params
   params.parameters() +=
       deltaParamsExtended.topLeftCorner<eBoundSize, 1>().eval();
 
   // update the scattering angles.
-  for (std::size_t matSurface = 0; matSurface < nMaterialSurfaces;
-       matSurface++) {
-    const std::size_t deltaPosition = eBoundSize + 2 * matSurface;
-    const GeometryIdentifier geoId = geoIdVector[matSurface];
-    const auto scatteringMapId = scatteringMap.find(geoId);
-    assert(scatteringMapId != scatteringMap.end() &&
-           "No scattering angles found for material surface.");
-    scatteringMapId->second.scatteringAngles().block<2, 1>(2, 0) +=
-        deltaParamsExtended.block<2, 1>(deltaPosition, 0).eval();
+    for (std::size_t matSurface = 0; matSurface < nMaterialSurfaces;
+        matSurface++) {
+        const std::size_t deltaPosition = energyLoss ? eBoundSize + 3 * matSurface : eBoundSize + 2 * matSurface;
+        const GeometryIdentifier geoId = geoIdVector[matSurface];
+        const auto materialMapId = materialMap.find(geoId);
+        assert(materialMapId != materialMap.end() &&
+            "No material properties found for material surface.");
+        materialMapId->second.scatteringAngles().block<2, 1>(2, 0) +=
+            deltaParamsExtended.block<2, 1>(deltaPosition, 0).eval();
+            //energy loss update for delta(q/p)
+        if(energyLoss){
+        materialMapId->second.deltaQOverP() +=
+            deltaParamsExtended.block<1,1>(deltaPosition + 2, 0).value();
+        }
+    
+    
   }
 
   return;
@@ -55,7 +62,7 @@ void Acts::Experimental::addMeasurementToGx2fSumsBackend(
     Gx2fSystem& extendedSystem,
     const std::vector<BoundMatrix>& jacobianFromStart,
     const Eigen::MatrixXd& covarianceMeasurement, const BoundVector& predicted,
-    const Eigen::VectorXd& measurement, const Eigen::MatrixXd& projector,
+    const Eigen::VectorXd& measurement, const Eigen::MatrixXd& projector, bool energyLoss,
     const Logger& logger) {
   // First, w try to invert the covariance matrix. If the inversion fails, we
   // can already abort.
@@ -78,19 +85,24 @@ void Acts::Experimental::addMeasurementToGx2fSumsBackend(
 
   // If we have material, loop here over all Jacobians. We add extra columns for
   // their phi-theta projections. These parts account for the propagation of the
-  // scattering angles.
+  // scattering angles. if energy loss is enabled, we also add the q/p projection.
   for (std::size_t matSurface = 1; matSurface < jacobianFromStart.size();
        matSurface++) {
     const BoundMatrix jac = jacobianFromStart[matSurface];
 
-    const Matrix<eBoundSize, 2> jacPhiTheta =
-        jac * Gx2fConstants::phiThetaProjector;
+    // const Matrix<eBoundSize, 2> jacPhiTheta =
+    //     jac * Gx2fConstants::phiThetaProjector;
 
-    // The position, where we need to insert the values in the extended Jacobian
-    const std::size_t deltaPosition = eBoundSize + 2 * (matSurface - 1);
-
-    extendedJacobian.template block<eBoundSize, 2>(0, deltaPosition) =
-        jacPhiTheta;
+    // The position, where we need to insert the values in the extended Jacobian accounting for material effects
+    const std::size_t deltaPosition = energyLoss ? eBoundSize + 3 * (matSurface - 1) : eBoundSize + 2 * (matSurface - 1);
+    if (energyLoss) {
+      extendedJacobian.block<eBoundSize, 3>(0, deltaPosition) =
+          jac * Gx2fConstants::phiThetaQOverPProjector;
+    } else {
+      extendedJacobian.block<eBoundSize, 2>(0, deltaPosition) =
+          jac * Gx2fConstants::phiThetaProjector;
+    }
+    
   }
 
   const Eigen::MatrixXd projJacobian = projector * extendedJacobian;
@@ -145,3 +157,36 @@ Eigen::VectorXd Acts::Experimental::computeGx2fDeltaParams(
   return extendedSystem.aMatrix().colPivHouseholderQr().solve(
       extendedSystem.bVector());
 }
+
+double Acts::Experimental::computeDeltaQOverPFromEnergyLoss(
+    const MaterialSlab& slab, const double eLoss, const ParticleHypothesis& particleHypothesis,
+    const double qOverP, const Direction direction) {
+  const PdgParticle absPdg = particleHypothesis.absolutePdg();
+  const double mass = particleHypothesis.mass();
+  const double absQ = particleHypothesis.absoluteCharge();
+
+  // Nothing to do for vacuum, when the momentum is externally fixed, or for
+  // neutral particles, which do not lose energy by ionisation and for which the
+  // material functions are not defined
+  if (slab.isVacuum() || particleHypothesis.hasMomentumHypothesis() ||
+      absQ <= 0.) {
+    return 0.;
+  }
+
+  const double momentum = particleHypothesis.extractMomentum(qOverP);
+
+  // in forward(backward) propagation, energy decreases(increases)
+  const double nextE = fastHypot(mass, momentum) - eLoss * direction;
+  // put the particle at rest if the energy loss is too large
+  double nextP = (mass < nextE) ? fastCathetus(nextE, mass) : 0.;
+
+  // minimum momentum below which we will not push particles via material update
+  static constexpr double minP = 10 * UnitConstants::MeV;
+  nextP = std::max(minP, nextP);
+
+  const double nextQOverP =
+      particleHypothesis.qOverP(nextP, std::copysign(absQ, qOverP));
+
+  return nextQOverP - qOverP;
+}
+
