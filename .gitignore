@@ -1,6 +1,7 @@
 installed
 *~*
 ._*
+*__pycache__*
 #cmt
 cmt/*.sh
 cmt/Make*

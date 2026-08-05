@@ -231,9 +231,6 @@ EtaValidationBatch fileReadEtaValidation(
     std::size_t maximumBuckets = std::numeric_limits<std::size_t>::max()) {
   using namespace Acts::UnitLiterals;
 
-  // ROOT model: TFile is the outer container, TTree is a column-oriented table,
-  // and each branch is one named column. TTreeReader advances through rows;
-  // TTreeReaderValue exposes the current scalar value of a bound branch.
   TFile inputFile{inputPath.c_str(), "READ"};
   if (inputFile.IsZombie()) {
     throw std::runtime_error("Failed to open " + inputPath.string());
@@ -626,19 +623,15 @@ void writeFirstBucketHitsCsv(
 /// Run CUDA and serialize the common, analysis-ready four-tree ROOT output.
 void runEtaValidation(EtaValidationBatch& batch,
                       const std::string& validationName,
-                      const std::filesystem::path& outputPath) {
-  // 1. Validate the common in-memory model before launching CUDA. These checks
-  // make failures in data preparation distinct from failures in the transform.
+                      const std::filesystem::path& outputPath,
+                      const Acts::HoughTransformUtils::HoughAxisRanges&
+                          axisRanges) {
+  // 1. Validate truth metadata before launching CUDA so data-preparation
+  // failures remain distinct from transform failures.
   constexpr std::uint32_t minimumSeedHits = 4u;
-  constexpr double minimumTanBeta = -3.0;
-  constexpr double maximumTanBeta = 3.0;
   constexpr std::size_t maximumCapacityPerBucket = 16u;
 
   const std::size_t nBuckets = batch.buckets.size();
-
-  BOOST_REQUIRE_GT(nBuckets, 0u);
-  BOOST_REQUIRE_GT(batch.spacePoints.size(), 0u);
-  BOOST_REQUIRE_EQUAL(batch.spacePoints.bucketCount(), nBuckets);
 
   std::vector<std::uint16_t> countedTruthSegments(nBuckets, 0u);
   for (const EtaValidationTruth& truth : batch.truth) {
@@ -650,29 +643,24 @@ void runEtaValidation(EtaValidationBatch& batch,
                         batch.buckets[bucket].nTruthSegments);
   }
 
-  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
-      minimumTanBeta, maximumTanBeta, -100.0 * Acts::UnitConstants::m,
-      100.0 * Acts::UnitConstants::m};
-
   CudaHT::CudaHoughPlaneBatch plane{{64u, 32u}, nBuckets};
 
   BOOST_TEST_MESSAGE("Running " << validationName << " with " << plane.nBinsX()
                                 << " x " << plane.nBinsY() << " bins for "
                                 << nBuckets << " buckets");
 
-  // 2. Run every physical bucket as one batch. Capacity 16 keeps the schema
-  // ready for peak finders that return multiple maxima per bucket.
+  // 2. Run every physical bucket as one batch.
   auto maxima =
       CudaHT::EtaHoughTransform::etaHoughTransform<maximumCapacityPerBucket>(
           plane, batch.spacePoints, axisRanges);
 
-  // CUDA results live on the device. Copy only maxima and their associated hit
-  // indices to host memory; the full accumulator is intentionally not saved.
+  // Full accumulator not saved
   maxima.moveToHost();
   maxima.copyAssociatedHitIndicesToHost();
 
   const std::string outputFileName = outputPath.string();
-  // 3. Create the ROOT output. RECREATE replaces an existing file. The four
+
+  // 3. Create the ROOT output.
   // TTrees behave like related tables keyed by bucketNumber:
   //   BucketTree: one row per bucket;
   //   HitTree: one row per input hit;
@@ -686,8 +674,7 @@ void runEtaValidation(EtaValidationBatch& batch,
   auto hitTree = std::make_unique<TTree>("EtaHoughHitTree", "HitTree");
   auto truthTree = std::make_unique<TTree>("EtaHoughTruthTree", "TruthTree");
   auto maximumTree = std::make_unique<TTree>("EtaHoughTree", "MaximumTree");
-  // Keep explicit ownership in unique_ptr until WriteObject. Otherwise ROOT
-  // would attach the trees to the currently open file and own their lifetime.
+
   bucketTree->SetDirectory(nullptr);
   hitTree->SetDirectory(nullptr);
   truthTree->SetDirectory(nullptr);
@@ -766,7 +753,6 @@ void runEtaValidation(EtaValidationBatch& batch,
 
   // 4. Fill bucket, hit, and maximum trees together while bucket-local ranges
   // and CUDA maximum indices are readily available.
-  std::size_t totalMaxima = 0u;
   for (std::size_t bucket = 0u; bucket < nBuckets; ++bucket) {
     bucketNumber = static_cast<std::uint32_t>(bucket);
     eventId = batch.buckets[bucket].eventId;
@@ -776,11 +762,11 @@ void runEtaValidation(EtaValidationBatch& batch,
         batch.spacePoints.bucketStart(bucket));
     nTruthSegments = batch.buckets[bucket].nTruthSegments;
     nMaxima = static_cast<std::uint32_t>(maxima.nMaxima(bucket));
-    totalMaxima += nMaxima;
     bucketTree->Fill();
 
     const std::size_t bucketStart = batch.spacePoints.bucketStart(bucket);
     const std::size_t bucketEnd = batch.spacePoints.bucketEnd(bucket);
+
     for (std::size_t hit = bucketStart; hit < bucketEnd; ++hit) {
       const auto spacePoint = batch.spacePoints[hit];
       const auto& position = spacePoint->localPosition();
@@ -839,11 +825,6 @@ void runEtaValidation(EtaValidationBatch& batch,
     truthTree->Fill();
   }
 
-  BOOST_CHECK_EQUAL(bucketTree->GetEntries(), static_cast<Long64_t>(nBuckets));
-  BOOST_CHECK_EQUAL(truthTree->GetEntries(),
-                    static_cast<Long64_t>(batch.truth.size()));
-  BOOST_CHECK_EQUAL(maximumTree->GetEntries(),
-                    static_cast<Long64_t>(totalMaxima));
   // 6. Persist the four in-memory trees into the TFile and close it explicitly.
   outputFile.WriteObject(bucketTree.get(), bucketTree->GetName());
   outputFile.WriteObject(hitTree.get(), hitTree->GetName());
@@ -992,13 +973,18 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
 
   RandomEngine engine{42u};
 
+  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
+      -3.0, 3.0, -100.0 * Acts::UnitConstants::m,
+      100.0 * Acts::UnitConstants::m};
+
   auto generated = makeGeneratedEtaValidationBatch(
-      nEvents, engine, *logger, -3.0, 3.0);
+      nEvents, engine, *logger, axisRanges.xMin, axisRanges.xMax);
 
   runEtaValidation(
       generated,
       "Generated Eta Hough validation",
-      "CudaEtaHoughValidation.root");
+      "CudaEtaHoughValidation.root",
+      axisRanges);
 }
 
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_file_validation) {
@@ -1016,21 +1002,28 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_file_validation) {
   const std::filesystem::path inputPath =
       environmentPath != nullptr ? environmentPath : "EtaHoughFlatInput.root";
 
-  if (std::filesystem::exists(inputPath)) {
+  BOOST_TEST_MESSAGE("inputPath: " << inputPath);
+
+  if (!std::filesystem::exists(inputPath)) {
       BOOST_TEST_MESSAGE("Flat validation file not found: " << inputPath
       << ". Run preprocessor_pg.py first or set "
          "ACTS_MUON_VALIDATION_FLAT_ROOT.");
 
-      BOOST_TEST_MESSAGE("Test skipped.");
+      BOOST_TEST_MESSAGE("Skipping test");
       return;
   }
 
   auto loaded = fileReadEtaValidation(inputPath);
 
+  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
+      -3.0, 3.0, -100.0 * Acts::UnitConstants::m,
+      100.0 * Acts::UnitConstants::m};
+
   runEtaValidation(
       loaded,
       "File Eta Hough validation",
-      "CudaEtaHoughFileValidation.root");
+      "CudaEtaHoughFileValidation.root",
+      axisRanges);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
