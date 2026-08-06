@@ -187,6 +187,9 @@ __device__ inline void countSharedDistinctYBands(
 
 namespace ActsExamples::CudaHoughTransformUtils::PeakFinders {
 
+using SlidingWindowConfig =
+    Acts::HoughTransformUtils::PeakFinders::SlidingWindowConfig;
+
 // Struct for GlobalMaximum Algorithm
 struct GlobalMaximumCandidate {
   YieldType nHits = -std::numeric_limits<YieldType>::infinity();
@@ -248,6 +251,117 @@ __device__ inline GlobalMaximumCandidate findGlobalMaximum(
   }
 
   return sharedCandidates[0];
+}
+
+/// Mark all cells accepted by the sliding-window peak finder.
+///
+/// The comparison and tie-breaking rules mirror
+/// Acts::HoughTransformUtils::PeakFinders::slidingWindowPeaks. Every thread in
+/// the block must call this function, and sharedPeakMask must contain at least
+/// nBinsX * nBinsY entries.
+__device__ inline void findSlidingWindowPeaks(
+    const YieldType* sharedHits, std::uint32_t nBinsX,
+    std::uint32_t nBinsY, const SlidingWindowConfig& config,
+    std::uint8_t* sharedPeakMask) {
+  const std::uint32_t nCells = nBinsX * nBinsY;
+
+  for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
+       localBin += blockDim.x) {
+    sharedPeakMask[localBin] = 0u;
+  }
+
+  __syncthreads();
+
+  const std::uint32_t xWindow =
+      static_cast<std::uint32_t>(config.xWindowSize);
+  const std::uint32_t yWindow =
+      static_cast<std::uint32_t>(config.yWindowSize);
+
+  for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
+       localBin += blockDim.x) {
+    const std::uint32_t xBin = localBin % nBinsX;
+    const std::uint32_t yBin = localBin / nBinsX;
+
+    // As in the CPU implementation, bins whose comparison window would cross
+    // an edge are not peak candidates.
+    if (xBin < xWindow || xWindow >= nBinsX - xBin || yBin < yWindow ||
+        yWindow >= nBinsY - yBin ||
+        sharedHits[localBin] < static_cast<YieldType>(config.threshold)) {
+      continue;
+    }
+
+    const YieldType maximum = sharedHits[localBin];
+    bool passesWindow = true;
+
+    for (std::uint32_t x = xBin - xWindow;
+         passesWindow && x <= xBin + xWindow; ++x) {
+      for (std::uint32_t y = yBin - yWindow; y <= yBin + yWindow; ++y) {
+        const int xDistance = static_cast<int>(x) - static_cast<int>(xBin);
+        const int yDistance = static_cast<int>(y) - static_cast<int>(yBin);
+
+        // For integer bin distances this is equivalent to the CPU expression
+        // yDistance + 0.1 > xDistance. Equal plateaus therefore retain the
+        // upper-right cell only.
+        const bool above = yDistance >= xDistance;
+        const YieldType hits = sharedHits[y * nBinsX + x];
+
+        if ((above && hits > maximum) || (!above && hits >= maximum)) {
+          passesWindow = false;
+          break;
+        }
+      }
+    }
+
+    sharedPeakMask[localBin] = passesWindow ? 1u : 0u;
+  }
+
+  __syncthreads();
+}
+
+/// Recenter one sliding-window peak using the same weighted-average rule as
+/// the CPU implementation. The recentering window is clipped at plane edges
+/// to keep device accesses valid for every configuration.
+__device__ inline std::uint32_t slidingWindowRecenter(
+    const YieldType* sharedHits, std::uint32_t nBinsX,
+    std::uint32_t nBinsY, std::uint32_t localBin,
+    const SlidingWindowConfig& config) {
+  if (!config.recenter) {
+    return localBin;
+  }
+
+  const std::uint32_t xCenter = localBin % nBinsX;
+  const std::uint32_t yCenter = localBin / nBinsX;
+  const std::uint32_t xRadius =
+      static_cast<std::uint32_t>(config.xRecenterSize);
+  const std::uint32_t yRadius =
+      static_cast<std::uint32_t>(config.yRecenterSize);
+
+  const std::uint32_t xBegin = xCenter > xRadius ? xCenter - xRadius : 0u;
+  const std::uint32_t yBegin = yCenter > yRadius ? yCenter - yRadius : 0u;
+  const std::uint32_t xEnd =
+      xRadius < nBinsX - 1u - xCenter ? xCenter + xRadius : nBinsX - 1u;
+  const std::uint32_t yEnd =
+      yRadius < nBinsY - 1u - yCenter ? yCenter + yRadius : nBinsY - 1u;
+
+  const YieldType maximum = sharedHits[localBin];
+  YieldType weightedX = YieldType{0.0};
+  YieldType weightedY = YieldType{0.0};
+  YieldType total = YieldType{0.0};
+
+  for (std::uint32_t x = xBegin; x <= xEnd; ++x) {
+    for (std::uint32_t y = yBegin; y <= yEnd; ++y) {
+      const YieldType hits = sharedHits[y * nBinsX + x];
+      if (hits >= maximum) {
+        weightedX += static_cast<YieldType>(x) * hits;
+        weightedY += static_cast<YieldType>(y) * hits;
+        total += hits;
+      }
+    }
+  }
+
+  const std::uint32_t xBin = static_cast<std::uint32_t>(weightedX / total);
+  const std::uint32_t yBin = static_cast<std::uint32_t>(weightedY / total);
+  return yBin * nBinsX + xBin;
 }
 
 /// @brief Atomically reserve one maximum slot in global memory
@@ -336,7 +450,8 @@ namespace ActsExamples::CudaHoughTransformUtils::detail {
 /// @brief Helper to get required number of shared Bytes
 /// for whoel Eta operation
 inline std::size_t sharedBytesForEtaHough(std::size_t nCells,
-                                          std::size_t threadsPerBlock) {
+                                          std::size_t threadsPerBlock,
+                                          PeakFinder peakFinder) {
   std::size_t bytes = 2u * nCells * sizeof(YieldType);
 
   bytes = alignUp(bytes, alignof(LayerMask));
@@ -345,6 +460,10 @@ inline std::size_t sharedBytesForEtaHough(std::size_t nCells,
   bytes = alignUp(bytes, alignof(std::uint32_t));
 
   bytes += nCells * sizeof(std::uint32_t);
+
+  if (peakFinder == PeakFinder::SlidingWindow) {
+    bytes += nCells * sizeof(std::uint8_t);
+  }
 
   bytes = alignUp(bytes, alignof(PeakFinders::GlobalMaximumCandidate));
 

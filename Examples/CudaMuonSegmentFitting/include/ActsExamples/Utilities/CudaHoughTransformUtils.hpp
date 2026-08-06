@@ -23,6 +23,12 @@ using CoordType = Acts::HoughTransformUtils::CoordType;
 using HoughPlaneConfig = Acts::HoughTransformUtils::HoughPlaneConfig;
 using HoughAxisRanges = Acts::HoughTransformUtils::HoughAxisRanges;
 
+/// Peak-finding algorithm used after filling a CUDA Hough plane.
+enum class PeakFinder : std::uint8_t {
+  GlobalMaximum,
+  SlidingWindow,
+};
+
 /// @brief Bit mask encoding which logical detector layers contributed to one Hough
 /// cell.
 ///

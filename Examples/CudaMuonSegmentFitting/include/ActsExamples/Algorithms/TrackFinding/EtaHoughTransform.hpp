@@ -25,7 +25,7 @@ void etaHoughTransformImpl(CudaHoughPlaneBatch& plane,
                            CudaHoughMaximumBatchArrays maxima,
                            const HoughAxisRanges& axisRanges, YieldType weight,
                            std::uint32_t threadsPerBlock,
-                           std::uint32_t numBlocks);
+                           std::uint32_t numBlocks, PeakFinder peakFinder);
 
 void fillEtaHitAssociationsImpl(CudaHoughPlaneBatch& plane,
                                 CudaMuonSpacePointContainer& spacePoints,
@@ -42,7 +42,8 @@ void fillEtaHitAssociationsImpl(CudaHoughPlaneBatch& plane,
 /// The returned maximum batch remains allocated on the device. Call
 /// moveToHost() when CPU access is required, but hit association has still to
 /// be done.
-template <std::size_t MaximaPerBucket = 1u>
+template <std::size_t MaximaPerBucket = 1u,
+          PeakFinder peakFinder = PeakFinder::GlobalMaximum>
 CudaHoughMaximumBatch<MaximaPerBucket> etaHoughTransform(
     CudaHoughPlaneBatch& plane, CudaMuonSpacePointContainer& spacePoints,
     const HoughAxisRanges& axisRanges, YieldType weight = YieldType{1.0},
@@ -52,7 +53,8 @@ CudaHoughMaximumBatch<MaximaPerBucket> etaHoughTransform(
 
   // 1. Fill the Hough planes, find maxima and count their associated hits.
   detail::etaHoughTransformImpl(plane, spacePoints, maxima.deviceArrays(),
-                                axisRanges, weight, threadsPerBlock, numBlocks);
+                                axisRanges, weight, threadsPerBlock, numBlocks,
+                                peakFinder);
 
   // 2. Copy only nMaxima and nAssociatedHits to the CPU.
   maxima.copyAssociationMetadataToHost();

@@ -597,7 +597,17 @@ void runEtaValidation(EtaValidationBatch& batch,
   // 1. Validate truth metadata before launching CUDA so data-preparation
   // failures remain distinct from transform failures.
   constexpr std::uint32_t minimumSeedHits = 4u;
-  constexpr std::size_t maximumCapacityPerBucket = 1u;
+  constexpr std::size_t maximumCapacityPerBucket = 8u;
+
+  const char* peakFinderEnvironment =
+      std::getenv("ACTS_MUON_CUDA_PEAK_FINDER");
+  const std::string peakFinderName = peakFinderEnvironment != nullptr
+                                         ? peakFinderEnvironment
+                                         : "global";
+
+  BOOST_REQUIRE_MESSAGE(
+      peakFinderName == "global" || peakFinderName == "sliding-window",
+      "ACTS_MUON_CUDA_PEAK_FINDER must be 'global' or 'sliding-window'");
 
   const std::size_t nBuckets = batch.buckets.size();
 
@@ -615,12 +625,21 @@ void runEtaValidation(EtaValidationBatch& batch,
 
   BOOST_TEST_MESSAGE("Running " << validationName << " with " << plane.nBinsX()
                                 << " x " << plane.nBinsY() << " bins for "
-                                << nBuckets << " buckets");
+                                << nBuckets << " buckets using the "
+                                << peakFinderName << " peak finder");
 
   // 2. Run every physical bucket as one batch.
-  auto maxima =
-      CudaHT::EtaHoughTransform::etaHoughTransform<maximumCapacityPerBucket>(
+  auto maxima = [&]() {
+    if (peakFinderName == "sliding-window") {
+      return CudaHT::EtaHoughTransform::etaHoughTransform<
+          maximumCapacityPerBucket, CudaHT::PeakFinder::SlidingWindow>(
           plane, batch.spacePoints, axisRanges);
+    }
+
+    return CudaHT::EtaHoughTransform::etaHoughTransform<
+        maximumCapacityPerBucket, CudaHT::PeakFinder::GlobalMaximum>(
+        plane, batch.spacePoints, axisRanges);
+  }();
 
   // Full accumulator not saved
   maxima.moveToHost();
@@ -911,6 +930,42 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_counts_overlapping_solutions_once) {
   BOOST_CHECK_EQUAL(associated.front(), 0u);
 }
 
+BOOST_AUTO_TEST_CASE(cuda_hough_eta_sliding_window_applies_threshold) {
+  // One zero-radius hit contributes twice to its Hough cells. The global
+  // finder returns that two-hit maximum, while the sliding-window finder uses
+  // the CPU algorithm's default threshold of three and returns no maximum.
+  auto spacePoints = makeBatchedDriftCircleContainer(
+      1u, std::vector<DriftCircleInput>{{0.0, 0.0, 0.0, 0.0}});
+
+  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
+      -1.0, 1.0, -1.0, 1.0};
+
+  CudaHT::CudaHoughPlaneBatch plane{{5u, 5u}, 1u};
+
+  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<
+      8u, CudaHT::PeakFinder::SlidingWindow>(plane, spacePoints, axisRanges);
+
+  maxima.moveToHost();
+  BOOST_CHECK_EQUAL(maxima.nMaxima(0u), 0u);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_hough_eta_sliding_window_finds_peak) {
+  auto spacePoints = makeBatchedDriftCircleContainer(1u);
+
+  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
+      -3.0, 3.0, -100.0 * Acts::UnitConstants::m,
+      100.0 * Acts::UnitConstants::m};
+
+  CudaHT::CudaHoughPlaneBatch plane{{15u, 15u}, 1u};
+
+  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<
+      8u, CudaHT::PeakFinder::SlidingWindow>(plane, spacePoints, axisRanges);
+
+  maxima.moveToHost();
+  BOOST_REQUIRE_EQUAL(maxima.nMaxima(0u), 1u);
+  BOOST_CHECK_GE(maxima.nHits(0u, 0u), 3.0f);
+}
+
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
   // Controlled end-to-end sample. This writes the same four ROOT trees as the
   // Particle Gun test, allowing one analysis program to process both outputs.
@@ -944,6 +999,8 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_file_validation) {
   // Realistic end-to-end sample prepared by preprocessor_pg.py. The environment
   // variable permits the large flat ROOT input to live outside the build tree.
+  // ACTS_MUON_CUDA_PEAK_FINDER selects "global" or "sliding-window" for both
+  // validation samples.
   int deviceCount = 0;
   if (cudaGetDeviceCount(&deviceCount) != cudaSuccess || deviceCount == 0) {
     BOOST_TEST_MESSAGE("No CUDA device found, skipping CUDA runtime test");

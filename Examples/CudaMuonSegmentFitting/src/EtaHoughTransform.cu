@@ -30,6 +30,7 @@ using ActsExamples::CudaHoughTransformUtils::CoordType;
 using ActsExamples::CudaHoughTransformUtils::CudaHoughPlaneBatchArrays;
 using ActsExamples::CudaHoughTransformUtils::HoughAxisRanges;
 using ActsExamples::CudaHoughTransformUtils::LayerMask;
+using ActsExamples::CudaHoughTransformUtils::PeakFinder;
 using ActsExamples::CudaHoughTransformUtils::YieldType;
 
 constexpr CoordType etaWidthScale = 1.0;  // mm
@@ -192,6 +193,7 @@ __global__ void computeEtaInterceptRangesMdtBatchKernel(
   }
 }
 
+template <PeakFinder peakFinder>
 __global__ void fillEtaDriftCirclesMdtBatchKernel(
     CudaHoughPlaneBatchArrays plane, CudaMuonSpacePointArrays spacePoints,
     CudaHoughMaximumBatchArrays maxima, HoughAxisRanges baseRanges,
@@ -218,8 +220,17 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
   auto* sharedAssociatedHits = reinterpret_cast<std::uint32_t*>(
       sharedMemory + associatedHitsOffset);
 
+  const std::size_t peakMaskOffset =
+      associatedHitsOffset + nCells * sizeof(std::uint32_t);
+
+  auto* sharedPeakMask =
+      reinterpret_cast<std::uint8_t*>(sharedMemory + peakMaskOffset);
+
+  constexpr std::size_t peakMaskElementSize =
+      peakFinder == PeakFinder::SlidingWindow ? sizeof(std::uint8_t) : 0u;
+
   const std::size_t candidateOffset = HoughDetail::alignUp(
-      associatedHitsOffset + nCells * sizeof(std::uint32_t),
+      peakMaskOffset + nCells * peakMaskElementSize,
       alignof(PeakFinders::GlobalMaximumCandidate));
 
   auto* sharedCandidates =
@@ -307,15 +318,41 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
     __syncthreads();
 
-    // 2.6 Find global Maximum
-    const PeakFinders::GlobalMaximumCandidate peak =
-        PeakFinders::findGlobalMaximum(sharedHits, nCells, sharedCandidates);
+    // 2.6 Find and append the configured maxima.
+    if constexpr (peakFinder == PeakFinder::GlobalMaximum) {
+      const PeakFinders::GlobalMaximumCandidate peak =
+          PeakFinders::findGlobalMaximum(sharedHits, nCells, sharedCandidates);
 
-    // 2.7 Append maximum to list of maximums of bucket
-    if (threadIdx.x == 0u) {
-      PeakFinders::appendEtaMaximum(maxima, plane, ranges, sharedLayers,
-                                    sharedLayerMask, sharedAssociatedHits,
-                                    bucket, peak);
+      if (threadIdx.x == 0u) {
+        PeakFinders::appendEtaMaximum(maxima, plane, ranges, sharedLayers,
+                                      sharedLayerMask, sharedAssociatedHits,
+                                      bucket, peak);
+      }
+    } else {
+      constexpr PeakFinders::SlidingWindowConfig config{};
+      PeakFinders::findSlidingWindowPeaks(
+          sharedHits, plane.nBinsX, plane.nBinsY, config, sharedPeakMask);
+
+      if (threadIdx.x == 0u) {
+        // Preserve the CPU implementation's deterministic x-major ordering.
+        for (std::uint32_t xBin = 0u; xBin < plane.nBinsX; ++xBin) {
+          for (std::uint32_t yBin = 0u; yBin < plane.nBinsY; ++yBin) {
+            std::uint32_t localBin = yBin * plane.nBinsX + xBin;
+            if (sharedPeakMask[localBin] == 0u) {
+              continue;
+            }
+
+            localBin = PeakFinders::slidingWindowRecenter(
+                sharedHits, plane.nBinsX, plane.nBinsY, localBin, config);
+
+            const PeakFinders::GlobalMaximumCandidate peak{
+                sharedHits[localBin], localBin};
+            PeakFinders::appendEtaMaximum(
+                maxima, plane, ranges, sharedLayers, sharedLayerMask,
+                sharedAssociatedHits, bucket, peak);
+          }
+        }
+      }
     }
 
     __syncthreads();
@@ -385,7 +422,7 @@ void etaHoughTransformImpl(CudaHoughPlaneBatch& plane,
                            CudaHoughMaximumBatchArrays maxima,
                            const HoughAxisRanges& axisRanges, YieldType weight,
                            std::uint32_t threadsPerBlock,
-                           std::uint32_t numBlocks) {
+                           std::uint32_t numBlocks, PeakFinder peakFinder) {
   if (threadsPerBlock == 0u) {
     throw std::invalid_argument("threadsPerBlock must be non-zero");
   }
@@ -444,7 +481,7 @@ void etaHoughTransformImpl(CudaHoughPlaneBatch& plane,
   }
 
   const std::size_t sharedBytes = HoughDetail::sharedBytesForEtaHough(
-      plane.nCellsPerBucket(), threadsPerBlock);
+      plane.nCellsPerBucket(), threadsPerBlock, peakFinder);
 
   if (sharedBytes > static_cast<std::size_t>(maximumSharedMemory)) {
     throw std::runtime_error(
@@ -474,11 +511,21 @@ void etaHoughTransformImpl(CudaHoughPlaneBatch& plane,
 
   ACTS_CUDA_CHECK(cudaGetLastError());
 
-  fillEtaDriftCirclesMdtBatchKernel<<<static_cast<unsigned>(numBlocks),
-                                      static_cast<unsigned>(threadsPerBlock),
-                                      sharedBytes>>>(
-      plane.deviceArrays(), spacePoints.deviceArrays(), maxima, axisRanges,
-      etaWidthScale, etaMaxWidth, weight);
+  if (peakFinder == PeakFinder::GlobalMaximum) {
+    fillEtaDriftCirclesMdtBatchKernel<PeakFinder::GlobalMaximum>
+        <<<static_cast<unsigned>(numBlocks),
+           static_cast<unsigned>(threadsPerBlock), sharedBytes>>>(
+            plane.deviceArrays(), spacePoints.deviceArrays(), maxima,
+            axisRanges, etaWidthScale, etaMaxWidth, weight);
+  } else if (peakFinder == PeakFinder::SlidingWindow) {
+    fillEtaDriftCirclesMdtBatchKernel<PeakFinder::SlidingWindow>
+        <<<static_cast<unsigned>(numBlocks),
+           static_cast<unsigned>(threadsPerBlock), sharedBytes>>>(
+            plane.deviceArrays(), spacePoints.deviceArrays(), maxima,
+            axisRanges, etaWidthScale, etaMaxWidth, weight);
+  } else {
+    throw std::invalid_argument("Unknown CUDA Hough peak finder");
+  }
 
   ACTS_CUDA_CHECK(cudaGetLastError());
 
