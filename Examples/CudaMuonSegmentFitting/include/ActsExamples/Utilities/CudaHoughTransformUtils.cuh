@@ -190,10 +190,61 @@ namespace ActsExamples::CudaHoughTransformUtils::PeakFinders {
 using SlidingWindowConfig =
     Acts::HoughTransformUtils::PeakFinders::SlidingWindowConfig;
 
+/// @brief Configuration for a layer-aware relative non-maximum-suppression
+/// peak finder.
+///
+/// The algorithm first rejects cells that do not satisfy the absolute yield,
+/// layer-count and distinct-hit requirements. The supported cells are ranked
+/// by layer count, distinct-hit count, accumulator yield and bin index. The
+/// highest-ranked cell defines the reference yield used by the relative
+/// threshold.
+///
+/// Local maxima are identified in a rectangular window. Windows are clipped at
+/// plane boundaries, so edge cells remain eligible. Equal-yield plateaus are
+/// resolved deterministically by retaining the cell with the lowest flattened
+/// bin index.
+///
+/// Accepted maxima are emitted in rank order. After each selection, candidates
+/// inside the configured X/Y spacing rectangle are suppressed. This removes
+/// nearby responses from the same accumulator structure. No peak recentering
+/// is performed.
+///
+/// Window and spacing values are expressed as fractions of the corresponding
+/// axis bin count. They are rounded upward to a minimum radius of one bin,
+/// allowing one configuration to be used with different plane dimensions.
+struct RelativeNmsConfig {
+  /// Absolute minimum accumulator yield.
+  YieldType threshold = 3.0f;
+  /// Minimum yield relative to the best layer-supported cell in the bucket.
+  YieldType fractionCutoff = 0.50f;
+  /// Minimum number of contributing detector layers for any retained peak.
+  YieldType minimumLayers = 3.0f;
+  /// Minimum number of distinct associated hits for any retained peak.
+  std::uint32_t minimumAssociatedHits = 4u;
+  /// Maximum number of peaks returned for one bucket.
+  std::uint32_t maximumPeaks = 4u;
+  /// Half-window for local-maximum detection as a fraction of each axis.
+  YieldType localWindowFraction = 0.04f;
+  /// Minimum relative separation of retained peaks along the X axis.
+  YieldType minimumXSpacingFraction = 0.08f;
+  /// Minimum relative separation of retained peaks along the Y axis.
+  YieldType minimumYSpacingFraction = 0.10f;
+};
+
 // Struct for GlobalMaximum Algorithm
 struct GlobalMaximumCandidate {
   YieldType nHits = -std::numeric_limits<YieldType>::infinity();
 
+  std::uint32_t localBin = std::numeric_limits<std::uint32_t>::max();
+};
+
+/// Candidate ordering used when only a finite number of marked peaks can be
+/// retained. Layer coverage and distinct hit count are preferred over the
+/// accumulator yield, which can count overlapping drift solutions twice.
+struct RankedPeakCandidate {
+  YieldType nLayers = -std::numeric_limits<YieldType>::infinity();
+  std::uint32_t nAssociatedHits = 0u;
+  YieldType nHits = -std::numeric_limits<YieldType>::infinity();
   std::uint32_t localBin = std::numeric_limits<std::uint32_t>::max();
 };
 
@@ -208,6 +259,20 @@ __device__ inline bool betterCandidate(const GlobalMaximumCandidate& candidate,
 
   return candidate.nHits == current.nHits &&
          candidate.localBin < current.localBin;
+}
+
+__device__ inline bool betterRankedPeakCandidate(
+    const RankedPeakCandidate& candidate, const RankedPeakCandidate& current) {
+  if (candidate.nLayers != current.nLayers) {
+    return candidate.nLayers > current.nLayers;
+  }
+  if (candidate.nAssociatedHits != current.nAssociatedHits) {
+    return candidate.nAssociatedHits > current.nAssociatedHits;
+  }
+  if (candidate.nHits != current.nHits) {
+    return candidate.nHits > current.nHits;
+  }
+  return candidate.localBin < current.localBin;
 }
 
 /// Every thread in the block must call this function.
@@ -316,6 +381,180 @@ __device__ inline void findSlidingWindowPeaks(
   }
 
   __syncthreads();
+}
+
+/// Convert a fraction of an axis into a non-zero, upward-rounded bin radius.
+__device__ inline std::uint32_t relativeBinRadius(std::uint32_t nBins,
+                                                  YieldType fraction) {
+  const YieldType scaled = fraction * static_cast<YieldType>(nBins);
+  std::uint32_t radius = static_cast<std::uint32_t>(scaled);
+  if (static_cast<YieldType>(radius) < scaled) {
+    ++radius;
+  }
+  return radius > 0u ? radius : 1u;
+}
+
+/// Mark cells satisfying the absolute, layer and distinct-hit requirements.
+/// The marked cells form the reference population for the relative cutoff.
+__device__ inline void markSupportedPeakCells(
+    const YieldType* sharedHits, const YieldType* sharedLayers,
+    const std::uint32_t* sharedAssociatedHits, std::uint32_t nCells,
+    const RelativeNmsConfig& config, std::uint8_t* sharedPeakMask) {
+  for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
+       localBin += blockDim.x) {
+    sharedPeakMask[localBin] =
+        sharedHits[localBin] >= config.threshold &&
+                sharedLayers[localBin] >= config.minimumLayers &&
+                sharedAssociatedHits[localBin] >= config.minimumAssociatedHits
+            ? 1u
+            : 0u;
+  }
+
+  __syncthreads();
+}
+
+/// Mark layer-supported local maxima passing an absolute and relative yield
+/// threshold. Unlike the CPU sliding-window implementation, comparison
+/// windows are clipped at plane boundaries rather than discarding edge peaks.
+/// Every thread in the block must call this function.
+__device__ inline void findRelativeNmsPeaks(
+    const YieldType* sharedHits, const YieldType* sharedLayers,
+    const std::uint32_t* sharedAssociatedHits, std::uint32_t nBinsX,
+    std::uint32_t nBinsY, YieldType referenceYield,
+    const RelativeNmsConfig& config, std::uint8_t* sharedPeakMask) {
+  const std::uint32_t nCells = nBinsX * nBinsY;
+  const std::uint32_t xWindow =
+      relativeBinRadius(nBinsX, config.localWindowFraction);
+  const std::uint32_t yWindow =
+      relativeBinRadius(nBinsY, config.localWindowFraction);
+  const YieldType relativeThreshold = config.fractionCutoff * referenceYield;
+  const YieldType threshold = relativeThreshold > config.threshold
+                                  ? relativeThreshold
+                                  : config.threshold;
+
+  for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
+       localBin += blockDim.x) {
+    sharedPeakMask[localBin] = 0u;
+
+    if (sharedHits[localBin] < threshold ||
+        sharedLayers[localBin] < config.minimumLayers ||
+        sharedAssociatedHits[localBin] < config.minimumAssociatedHits) {
+      continue;
+    }
+
+    const std::uint32_t xBin = localBin % nBinsX;
+    const std::uint32_t yBin = localBin / nBinsX;
+    const std::uint32_t xBegin = xBin > xWindow ? xBin - xWindow : 0u;
+    const std::uint32_t yBegin = yBin > yWindow ? yBin - yWindow : 0u;
+    const std::uint32_t xEnd =
+        xWindow < nBinsX - 1u - xBin ? xBin + xWindow : nBinsX - 1u;
+    const std::uint32_t yEnd =
+        yWindow < nBinsY - 1u - yBin ? yBin + yWindow : nBinsY - 1u;
+    const YieldType candidateYield = sharedHits[localBin];
+    bool localMaximum = true;
+
+    for (std::uint32_t x = xBegin; localMaximum && x <= xEnd; ++x) {
+      for (std::uint32_t y = yBegin; y <= yEnd; ++y) {
+        const std::uint32_t neighbourBin = y * nBinsX + x;
+        if (neighbourBin == localBin) {
+          continue;
+        }
+        const YieldType neighbourYield = sharedHits[neighbourBin];
+        if (neighbourYield < threshold ||
+            sharedLayers[neighbourBin] < config.minimumLayers ||
+            sharedAssociatedHits[neighbourBin] <
+                config.minimumAssociatedHits) {
+          continue;
+        }
+        if (neighbourYield > candidateYield ||
+            (neighbourYield == candidateYield && neighbourBin < localBin)) {
+          localMaximum = false;
+          break;
+        }
+      }
+    }
+
+    sharedPeakMask[localBin] = localMaximum ? 1u : 0u;
+  }
+
+  __syncthreads();
+}
+
+/// Remove marked peaks that are close to a retained peak in both normalized
+/// plane coordinates. Every thread in the block must call this function.
+__device__ inline void suppressRelativeNmsNeighbours(
+    std::uint8_t* sharedPeakMask, std::uint32_t nBinsX,
+    std::uint32_t nBinsY, std::uint32_t selectedBin,
+    const RelativeNmsConfig& config) {
+  const std::uint32_t nCells = nBinsX * nBinsY;
+  const std::uint32_t selectedX = selectedBin % nBinsX;
+  const std::uint32_t selectedY = selectedBin / nBinsX;
+  const std::uint32_t xSpacing =
+      relativeBinRadius(nBinsX, config.minimumXSpacingFraction);
+  const std::uint32_t ySpacing =
+      relativeBinRadius(nBinsY, config.minimumYSpacingFraction);
+
+  for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
+       localBin += blockDim.x) {
+    if (sharedPeakMask[localBin] == 0u) {
+      continue;
+    }
+    const std::uint32_t xBin = localBin % nBinsX;
+    const std::uint32_t yBin = localBin / nBinsX;
+    const std::uint32_t xDistance =
+        xBin > selectedX ? xBin - selectedX : selectedX - xBin;
+    const std::uint32_t yDistance =
+        yBin > selectedY ? yBin - selectedY : selectedY - yBin;
+    if (xDistance <= xSpacing && yDistance <= ySpacing) {
+      sharedPeakMask[localBin] = 0u;
+    }
+  }
+
+  __syncthreads();
+}
+
+/// Select the strongest remaining marked peak.
+/// Every thread in the block must call this function, and sharedCandidates
+/// must contain at least blockDim.x entries.
+__device__ inline RankedPeakCandidate findBestMarkedPeak(
+    const YieldType* sharedHits, const YieldType* sharedLayers,
+    const std::uint32_t* sharedAssociatedHits,
+    const std::uint8_t* sharedPeakMask, std::uint32_t nCells,
+    RankedPeakCandidate* sharedCandidates) {
+  RankedPeakCandidate localBest{};
+
+  for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
+       localBin += blockDim.x) {
+    if (sharedPeakMask[localBin] == 0u) {
+      continue;
+    }
+
+    const RankedPeakCandidate candidate{
+        sharedLayers[localBin], sharedAssociatedHits[localBin],
+        sharedHits[localBin], localBin};
+    if (betterRankedPeakCandidate(candidate, localBest)) {
+      localBest = candidate;
+    }
+  }
+
+  sharedCandidates[threadIdx.x] = localBest;
+  __syncthreads();
+
+  for (std::uint32_t active = blockDim.x; active > 1u;) {
+    const std::uint32_t nextActive = (active + 1u) / 2u;
+    if (threadIdx.x < nextActive) {
+      const std::uint32_t partner = threadIdx.x + nextActive;
+      if (partner < active && betterRankedPeakCandidate(
+                                  sharedCandidates[partner],
+                                  sharedCandidates[threadIdx.x])) {
+        sharedCandidates[threadIdx.x] = sharedCandidates[partner];
+      }
+    }
+    __syncthreads();
+    active = nextActive;
+  }
+
+  return sharedCandidates[0];
 }
 
 /// Recenter one sliding-window peak using the same weighted-average rule as
@@ -461,13 +700,17 @@ inline std::size_t sharedBytesForEtaHough(std::size_t nCells,
 
   bytes += nCells * sizeof(std::uint32_t);
 
-  if (peakFinder == PeakFinder::SlidingWindow) {
+  if (peakFinder != PeakFinder::GlobalMaximum) {
     bytes += nCells * sizeof(std::uint8_t);
   }
 
-  bytes = alignUp(bytes, alignof(PeakFinders::GlobalMaximumCandidate));
-
-  bytes += threadsPerBlock * sizeof(PeakFinders::GlobalMaximumCandidate);
+  if (peakFinder != PeakFinder::GlobalMaximum) {
+    bytes = alignUp(bytes, alignof(PeakFinders::RankedPeakCandidate));
+    bytes += threadsPerBlock * sizeof(PeakFinders::RankedPeakCandidate);
+  } else {
+    bytes = alignUp(bytes, alignof(PeakFinders::GlobalMaximumCandidate));
+    bytes += threadsPerBlock * sizeof(PeakFinders::GlobalMaximumCandidate);
+  }
 
   return bytes;
 }

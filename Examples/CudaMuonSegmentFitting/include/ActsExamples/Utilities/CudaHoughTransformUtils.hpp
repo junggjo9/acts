@@ -27,6 +27,7 @@ using HoughAxisRanges = Acts::HoughTransformUtils::HoughAxisRanges;
 enum class PeakFinder : std::uint8_t {
   GlobalMaximum,
   SlidingWindow,
+  RelativeNms,
 };
 
 /// @brief Bit mask encoding which logical detector layers contributed to one Hough

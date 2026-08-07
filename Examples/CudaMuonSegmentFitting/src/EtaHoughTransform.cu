@@ -227,15 +227,23 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
       reinterpret_cast<std::uint8_t*>(sharedMemory + peakMaskOffset);
 
   constexpr std::size_t peakMaskElementSize =
-      peakFinder == PeakFinder::SlidingWindow ? sizeof(std::uint8_t) : 0u;
+      peakFinder != PeakFinder::GlobalMaximum ? sizeof(std::uint8_t) : 0u;
+
+  constexpr std::size_t candidateAlignment =
+      peakFinder != PeakFinder::GlobalMaximum
+          ? alignof(PeakFinders::RankedPeakCandidate)
+          : alignof(PeakFinders::GlobalMaximumCandidate);
 
   const std::size_t candidateOffset = HoughDetail::alignUp(
-      peakMaskOffset + nCells * peakMaskElementSize,
-      alignof(PeakFinders::GlobalMaximumCandidate));
+      peakMaskOffset + nCells * peakMaskElementSize, candidateAlignment);
 
   auto* sharedCandidates =
       reinterpret_cast<PeakFinders::GlobalMaximumCandidate*>(sharedMemory +
                                                              candidateOffset);
+
+  auto* sharedRankedCandidates =
+      reinterpret_cast<PeakFinders::RankedPeakCandidate*>(sharedMemory +
+                                                           candidateOffset);
 
   // 2. Start grid stride loop over buckets
   for (std::uint32_t bucket = blockIdx.x; bucket < plane.nBuckets;
@@ -328,30 +336,107 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
                                       sharedLayerMask, sharedAssociatedHits,
                                       bucket, peak);
       }
-    } else {
-      constexpr PeakFinders::SlidingWindowConfig config{};
+    } else if constexpr (peakFinder == PeakFinder::SlidingWindow) {
+      // Recentring is disabled so associations are evaluated at the selected
+      // local-maximum bin.
+      constexpr PeakFinders::SlidingWindowConfig config{
+          3u, 2u, 2u, false, 0u, 0u};
+
+      // Include a threshold-passing global maximum so edge maxima are eligible.
+      const PeakFinders::GlobalMaximumCandidate globalPeak =
+          PeakFinders::findGlobalMaximum(sharedHits, nCells, sharedCandidates);
+
       PeakFinders::findSlidingWindowPeaks(
           sharedHits, plane.nBinsX, plane.nBinsY, config, sharedPeakMask);
 
-      if (threadIdx.x == 0u) {
-        // Preserve the CPU implementation's deterministic x-major ordering.
-        for (std::uint32_t xBin = 0u; xBin < plane.nBinsX; ++xBin) {
-          for (std::uint32_t yBin = 0u; yBin < plane.nBinsY; ++yBin) {
-            std::uint32_t localBin = yBin * plane.nBinsX + xBin;
-            if (sharedPeakMask[localBin] == 0u) {
-              continue;
-            }
+      const bool storeGlobal =
+          globalPeak.nHits >= static_cast<YieldType>(config.threshold);
 
-            localBin = PeakFinders::slidingWindowRecenter(
-                sharedHits, plane.nBinsX, plane.nBinsY, localBin, config);
-
-            const PeakFinders::GlobalMaximumCandidate peak{
-                sharedHits[localBin], localBin};
-            PeakFinders::appendEtaMaximum(
+      if (threadIdx.x == 0u && storeGlobal) {
+        if (PeakFinders::appendEtaMaximum(
                 maxima, plane, ranges, sharedLayers, sharedLayerMask,
-                sharedAssociatedHits, bucket, peak);
+                sharedAssociatedHits, bucket, globalPeak)) {
+          sharedPeakMask[globalPeak.localBin] = 0u;
+        }
+      }
+
+      __syncthreads();
+
+      // Rank remaining peaks by layer coverage, distinct associated hits,
+      // accumulator yield and bin index.
+      constexpr std::uint32_t maximumSlidingPeaks = 3u;
+      const std::uint32_t selectionLimit =
+          maxima.capacityPerBucket < maximumSlidingPeaks
+              ? maxima.capacityPerBucket
+              : maximumSlidingPeaks;
+      const std::uint32_t firstLocalSlot = storeGlobal ? 1u : 0u;
+      for (std::uint32_t slot = firstLocalSlot;
+           slot < selectionLimit; ++slot) {
+        const PeakFinders::RankedPeakCandidate bestPeak =
+            PeakFinders::findBestMarkedPeak(
+                sharedHits, sharedLayers, sharedAssociatedHits, sharedPeakMask,
+                nCells, sharedRankedCandidates);
+
+        if (bestPeak.localBin ==
+            std::numeric_limits<std::uint32_t>::max()) {
+          break;
+        }
+
+        if (threadIdx.x == 0u) {
+          sharedPeakMask[bestPeak.localBin] = 0u;
+          const PeakFinders::GlobalMaximumCandidate candidate{
+              bestPeak.nHits, bestPeak.localBin};
+          if (!PeakFinders::appendEtaMaximum(
+                  maxima, plane, ranges, sharedLayers, sharedLayerMask,
+                  sharedAssociatedHits, bucket, candidate)) {
+            sharedPeakMask[bestPeak.localBin] = 0u;
           }
         }
+
+        __syncthreads();
+      }
+    } else {
+      constexpr PeakFinders::RelativeNmsConfig config{};
+
+      // Build the supported-cell population and determine its reference yield.
+      PeakFinders::markSupportedPeakCells(
+          sharedHits, sharedLayers, sharedAssociatedHits, nCells, config,
+          sharedPeakMask);
+      const PeakFinders::RankedPeakCandidate referencePeak =
+          PeakFinders::findBestMarkedPeak(
+              sharedHits, sharedLayers, sharedAssociatedHits, sharedPeakMask,
+              nCells, sharedRankedCandidates);
+
+      PeakFinders::findRelativeNmsPeaks(
+          sharedHits, sharedLayers, sharedAssociatedHits, plane.nBinsX,
+          plane.nBinsY, referencePeak.nHits, config, sharedPeakMask);
+
+      const std::uint32_t selectionLimit =
+          maxima.capacityPerBucket < config.maximumPeaks
+              ? maxima.capacityPerBucket
+              : config.maximumPeaks;
+      for (std::uint32_t slot = 0u; slot < selectionLimit; ++slot) {
+        const PeakFinders::RankedPeakCandidate bestPeak =
+            PeakFinders::findBestMarkedPeak(
+                sharedHits, sharedLayers, sharedAssociatedHits, sharedPeakMask,
+                nCells, sharedRankedCandidates);
+
+        if (bestPeak.localBin ==
+            std::numeric_limits<std::uint32_t>::max()) {
+          break;
+        }
+
+        if (threadIdx.x == 0u) {
+          const PeakFinders::GlobalMaximumCandidate candidate{
+              bestPeak.nHits, bestPeak.localBin};
+          PeakFinders::appendEtaMaximum(
+              maxima, plane, ranges, sharedLayers, sharedLayerMask,
+              sharedAssociatedHits, bucket, candidate);
+        }
+
+        PeakFinders::suppressRelativeNmsNeighbours(
+            sharedPeakMask, plane.nBinsX, plane.nBinsY, bestPeak.localBin,
+            config);
       }
     }
 
@@ -519,6 +604,12 @@ void etaHoughTransformImpl(CudaHoughPlaneBatch& plane,
             axisRanges, etaWidthScale, etaMaxWidth, weight);
   } else if (peakFinder == PeakFinder::SlidingWindow) {
     fillEtaDriftCirclesMdtBatchKernel<PeakFinder::SlidingWindow>
+        <<<static_cast<unsigned>(numBlocks),
+           static_cast<unsigned>(threadsPerBlock), sharedBytes>>>(
+            plane.deviceArrays(), spacePoints.deviceArrays(), maxima,
+            axisRanges, etaWidthScale, etaMaxWidth, weight);
+  } else if (peakFinder == PeakFinder::RelativeNms) {
+    fillEtaDriftCirclesMdtBatchKernel<PeakFinder::RelativeNms>
         <<<static_cast<unsigned>(numBlocks),
            static_cast<unsigned>(threadsPerBlock), sharedBytes>>>(
             plane.deviceArrays(), spacePoints.deviceArrays(), maxima,
