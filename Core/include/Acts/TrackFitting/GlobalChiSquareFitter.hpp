@@ -264,13 +264,13 @@ struct MaterialProperties {
   /// @param invCovarianceMaterial_ The inverse covariance of the material.
   /// @param materialIsValid_ A boolean flag indicating whether the material is valid.
   MaterialProperties(const BoundVector& scatteringAngles_,
-                      const double deltaQOverP,
+                      const double deltaQOverPexpected,
                        const double invCovarianceMaterial_,
                        const double invCovarianceQOverP,
                        const bool materialIsValid_)
       : m_scatteringAngles(scatteringAngles_),
-        m_deltaQOverP(deltaQOverP),
-        m_deltaQOverPexpected(deltaQOverP),
+        m_deltaQOverP(0.),
+        m_deltaQOverPexpected(deltaQOverPexpected),
         m_invCovarianceMaterial(invCovarianceMaterial_),
         m_invCovarianceQOverP(invCovarianceQOverP),
         m_materialIsValid(materialIsValid_) {}
@@ -545,6 +545,10 @@ void addMaterialToGx2fSums(
       ACTS_VERBOSE("Fitting energy loss");
       invCovQOverP = materialMapId->second.invCovarianceQOverP();
       residdeltaQOverP = materialMapId->second.deltaQOverP() - materialMapId->second.deltaQOverPexpected();
+      ACTS_VERBOSE("    deltaQOverP: " << materialMapId->second.deltaQOverP());
+      ACTS_VERBOSE("    deltaQOverPexpected: " << materialMapId->second.deltaQOverPexpected());
+      ACTS_VERBOSE("    invCovQOverP: " << invCovQOverP);
+      ACTS_VERBOSE("    residdeltaQOverP: " << residdeltaQOverP);
       extendedSystem.aMatrix()(deltaPosition + 2, deltaPosition + 2) += invCovQOverP;
       extendedSystem.bVector()(deltaPosition + 2, 0) -=
           invCovQOverP * residdeltaQOverP;
@@ -1003,7 +1007,7 @@ class Gx2Fitter {
           }
 
           materialMap->emplace(
-              geoId, MaterialProperties{BoundVector::Zero(), invSigma2, invSigma2QOverP, deltaQOverP,
+              geoId, MaterialProperties{BoundVector::Zero(), deltaQOverP, invSigma2, invSigma2QOverP, 
                                           slabIsValid});
           materialMapId = materialMap->find(geoId);
 
@@ -1063,7 +1067,9 @@ class Gx2Fitter {
 
               //update paramaters for energty loss if energy loss is also enabled
               if(energyLoss){
-                ACTS_VERBOSE("        boundParams before the update: "
+                ACTS_VERBOSE("   Update parameters with energy loss.");
+                ACTS_VERBOSE("  Energy Loss deltaQoverP: "<< materialMapId->second.deltaQOverP());
+                      ACTS_VERBOSE("        boundParams before the update: "
                          << boundParams.parameters().transpose());
                 boundParams.parameters()[eBoundQOverP] +=
                 materialMapId->second.deltaQOverP();
@@ -1174,7 +1180,11 @@ class Gx2Fitter {
           ACTS_VERBOSE("        boundParams after the update: "
                        << boundParams.parameters().transpose());
           if(energyLoss){
-                ACTS_VERBOSE("  Energy Loss:      boundParams before the update: "
+            
+             ACTS_VERBOSE("   Update parameters with energy loss.");
+              ACTS_VERBOSE("  Energy Loss deltaQoverP: "<< materialMapId->second.deltaQOverP());
+            
+                ACTS_VERBOSE("  boundParams before the update: "
                          << boundParams.parameters().transpose());
                 boundParams.parameters()[eBoundQOverP] +=
                 materialMapId->second.deltaQOverP();
@@ -1580,7 +1590,7 @@ class Gx2Fitter {
       auto& gx2fActor = propagatorOptions.actorList.template get<GX2FActor>();
       gx2fActor.inputMeasurements = &inputMeasurements;
       gx2fActor.multipleScattering = true;
-      gx2fActor.energyLoss = energyLoss;
+      gx2fActor.energyLoss = true;
       gx2fActor.extensions = gx2fOptions.extensions;
       gx2fActor.calibrationContext = &gx2fOptions.calibrationContext.get();
       gx2fActor.actorLogger = m_actorLogger.get();
@@ -1727,6 +1737,7 @@ class Gx2Fitter {
       auto& gx2fActor = propagatorOptions.actorList.template get<GX2FActor>();
       gx2fActor.inputMeasurements = &inputMeasurements;
       gx2fActor.multipleScattering = multipleScattering;
+      gx2fActor.energyLoss = energyLoss;
       gx2fActor.extensions = gx2fOptions.extensions;
       gx2fActor.calibrationContext = &gx2fOptions.calibrationContext.get();
       gx2fActor.actorLogger = m_actorLogger.get();
