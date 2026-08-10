@@ -337,63 +337,34 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
                                       bucket, peak);
       }
     } else if constexpr (peakFinder == PeakFinder::SlidingWindow) {
-      // Recentring is disabled so associations are evaluated at the selected
-      // local-maximum bin.
-      constexpr PeakFinders::SlidingWindowConfig config{
-          3u, 2u, 2u, false, 0u, 0u};
-
-      // Include a threshold-passing global maximum so edge maxima are eligible.
-      const PeakFinders::GlobalMaximumCandidate globalPeak =
-          PeakFinders::findGlobalMaximum(sharedHits, nCells, sharedCandidates);
-
+      constexpr PeakFinders::RelativeNmsConfig nmsConfig{};
+      PeakFinders::SlidingWindowConfig config{};
+      config.xWindowSize = PeakFinders::relativeBinRadius(
+          plane.nBinsX, nmsConfig.localWindowFraction);
+      config.yWindowSize = PeakFinders::relativeBinRadius(
+          plane.nBinsY, nmsConfig.localWindowFraction);
       PeakFinders::findSlidingWindowPeaks(
           sharedHits, plane.nBinsX, plane.nBinsY, config, sharedPeakMask);
 
-      const bool storeGlobal =
-          globalPeak.nHits >= static_cast<YieldType>(config.threshold);
+      if (threadIdx.x == 0u) {
+        // Preserve the CPU implementation's deterministic x-major ordering.
+        for (std::uint32_t xBin = 0u; xBin < plane.nBinsX; ++xBin) {
+          for (std::uint32_t yBin = 0u; yBin < plane.nBinsY; ++yBin) {
+            std::uint32_t localBin = yBin * plane.nBinsX + xBin;
+            if (sharedPeakMask[localBin] == 0u) {
+              continue;
+            }
 
-      if (threadIdx.x == 0u && storeGlobal) {
-        if (PeakFinders::appendEtaMaximum(
+            localBin = PeakFinders::slidingWindowRecenter(
+                sharedHits, plane.nBinsX, plane.nBinsY, localBin, config);
+
+            const PeakFinders::GlobalMaximumCandidate peak{
+                sharedHits[localBin], localBin};
+            PeakFinders::appendEtaMaximum(
                 maxima, plane, ranges, sharedLayers, sharedLayerMask,
-                sharedAssociatedHits, bucket, globalPeak)) {
-          sharedPeakMask[globalPeak.localBin] = 0u;
-        }
-      }
-
-      __syncthreads();
-
-      // Rank remaining peaks by layer coverage, distinct associated hits,
-      // accumulator yield and bin index.
-      constexpr std::uint32_t maximumSlidingPeaks = 3u;
-      const std::uint32_t selectionLimit =
-          maxima.capacityPerBucket < maximumSlidingPeaks
-              ? maxima.capacityPerBucket
-              : maximumSlidingPeaks;
-      const std::uint32_t firstLocalSlot = storeGlobal ? 1u : 0u;
-      for (std::uint32_t slot = firstLocalSlot;
-           slot < selectionLimit; ++slot) {
-        const PeakFinders::RankedPeakCandidate bestPeak =
-            PeakFinders::findBestMarkedPeak(
-                sharedHits, sharedLayers, sharedAssociatedHits, sharedPeakMask,
-                nCells, sharedRankedCandidates);
-
-        if (bestPeak.localBin ==
-            std::numeric_limits<std::uint32_t>::max()) {
-          break;
-        }
-
-        if (threadIdx.x == 0u) {
-          sharedPeakMask[bestPeak.localBin] = 0u;
-          const PeakFinders::GlobalMaximumCandidate candidate{
-              bestPeak.nHits, bestPeak.localBin};
-          if (!PeakFinders::appendEtaMaximum(
-                  maxima, plane, ranges, sharedLayers, sharedLayerMask,
-                  sharedAssociatedHits, bucket, candidate)) {
-            sharedPeakMask[bestPeak.localBin] = 0u;
+                sharedAssociatedHits, bucket, peak);
           }
         }
-
-        __syncthreads();
       }
     } else {
       constexpr PeakFinders::RelativeNmsConfig config{};

@@ -224,6 +224,8 @@ struct RelativeNmsConfig {
   /// Maximum number of peaks returned for one bucket.
   std::uint32_t maximumPeaks = 4u;
   /// Half-window for local-maximum detection as a fraction of each axis.
+  /// With the default value, the X/Y radii (and full window dimensions) are
+  /// 1/1 (3x3) for 15x15, 1/1 (3x3) for 25x25, and 3/2 (7x5) for 64x32.
   YieldType localWindowFraction = 0.04f;
   /// Minimum relative separation of retained peaks along the X axis.
   YieldType minimumXSpacingFraction = 0.08f;

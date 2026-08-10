@@ -1035,6 +1035,7 @@ void runEtaValidation(EtaValidationBatch& batch,
 
   double uploadSeconds = 0.0;
   double processingSeconds = 0.0;
+  double downloadSeconds = 0.0;
   const auto totalStart = BenchmarkClock::now();
   auto maxima = [&]() {
     Acts::ScopedTimer totalTimer{"CUDA Eta total", *timerLogger};
@@ -1072,15 +1073,24 @@ void runEtaValidation(EtaValidationBatch& batch,
     processingSeconds =
         elapsedSeconds(processingStart, BenchmarkClock::now());
 
+    const auto downloadStart = BenchmarkClock::now();
+    {
+      Acts::ScopedTimer downloadTimer{"CUDA Eta device-to-host", *timerLogger};
+      result.moveToHost();
+      result.copyAssociatedHitIndicesToHost();
+      const cudaError_t status = cudaDeviceSynchronize();
+      if (status != cudaSuccess) {
+        throw std::runtime_error(std::string{"CUDA download failed: "} +
+                                 cudaGetErrorString(status));
+      }
+    }
+    downloadSeconds = elapsedSeconds(downloadStart, BenchmarkClock::now());
+
     return result;
   }();
 
   const double totalSeconds =
       elapsedSeconds(totalStart, BenchmarkClock::now());
-  // Host copies are needed only for ROOT serialization and are intentionally
-  // outside all benchmark intervals.
-  maxima.moveToHost();
-  maxima.copyAssociatedHitIndicesToHost();
 
   const double bucketsPerSecond =
       totalSeconds > 0.0 ? static_cast<double>(nBuckets) / totalSeconds : 0.0;
@@ -1088,6 +1098,14 @@ void runEtaValidation(EtaValidationBatch& batch,
       nEvents == 0u
           ? 0.0
           : 1000.0 * processingSeconds / static_cast<double>(nEvents);
+  const double uploadMillisecondsPerEvent =
+      nEvents == 0u
+          ? 0.0
+          : 1000.0 * uploadSeconds / static_cast<double>(nEvents);
+  const double downloadMillisecondsPerEvent =
+      nEvents == 0u
+          ? 0.0
+          : 1000.0 * downloadSeconds / static_cast<double>(nEvents);
   const double totalMillisecondsPerEvent =
       nEvents == 0u
           ? 0.0
@@ -1095,9 +1113,15 @@ void runEtaValidation(EtaValidationBatch& batch,
   std::cout << "Eta timing GPU upload: " << uploadSeconds << " s" << std::endl;
   std::cout << "Eta timing GPU processing: " << processingSeconds << " s"
             << std::endl;
+  std::cout << "Eta timing GPU download: " << downloadSeconds << " s"
+            << std::endl;
+  std::cout << "Eta timing GPU upload per event (amortized): "
+            << uploadMillisecondsPerEvent << " ms" << std::endl;
   std::cout << "Eta timing GPU processing per event (amortized): "
             << processingMillisecondsPerEvent << " ms" << std::endl;
-  std::cout << "Eta timing GPU upload plus processing per event: "
+  std::cout << "Eta timing GPU download per event (amortized): "
+            << downloadMillisecondsPerEvent << " ms" << std::endl;
+  std::cout << "Eta timing GPU transfers plus processing per event: "
             << totalMillisecondsPerEvent << " ms" << std::endl;
   std::cout << "Eta transform wall time: " << totalSeconds << " s ("
             << bucketsPerSecond << " buckets/s)" << std::endl;
