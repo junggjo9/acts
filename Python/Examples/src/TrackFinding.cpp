@@ -108,7 +108,8 @@ void addTrackFinding(py::module& mex) {
   ACTS_PYTHON_DECLARE_ALGORITHM(MuonHoughSeeder, mex, "MuonHoughSeeder",
                                 inTruthSegments, inSpacePoints, outHoughMax,
                                 nBinsTanTheta, nBinsY0, nBinsTanPhi, nBinsX0,
-                                dumpVisualization, visualizationFunction);
+                                extendWithPhi, dumpVisualization,
+                                visualizationFunction);
 
   ACTS_PYTHON_DECLARE_ALGORITHM(
       TrackParamsEstimationAlgorithm, mex, "TrackParamsEstimationAlgorithm",

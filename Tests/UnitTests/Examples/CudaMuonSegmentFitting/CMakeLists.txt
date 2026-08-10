@@ -3,6 +3,7 @@ find_package(CUDAToolkit REQUIRED)
 set(unittest_extra_libraries
     Acts::ExamplesCudaMuonSegmentFitting
     Acts::ExamplesFramework
+    Acts::ExamplesTrackFinding
     CUDA::cudart
     ROOT::TreePlayer
     ROOT::Tree
