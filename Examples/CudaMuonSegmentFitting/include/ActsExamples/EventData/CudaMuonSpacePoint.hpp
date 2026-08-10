@@ -344,8 +344,16 @@ class CudaMuonSpacePointContainer {
   /// @brief Copies all host columns to device memory.
   void moveToDevice();
 
+  /// @brief Copies all host columns using pinned staging memory and a CUDA
+  /// stream. The method waits only for the supplied stream.
+  void moveToDevice(cudaStream_t stream);
+
   /// @brief Copies all device columns back to host memory.
   void moveToHost();
+
+  /// @brief Copies all device columns using pinned staging memory and a CUDA
+  /// stream. The method waits only for the supplied stream.
+  void moveToHost(cudaStream_t stream);
 
   /// @brief Releases all device memory.
   void clearDevice() noexcept;

@@ -36,16 +36,20 @@ void freeDeviceData(CudaHoughPlaneBatchArrays& device) noexcept {
 
 void copyHostToDevice(CudaHoughPlaneBatchArrays& device,
                       const std::vector<CoordType>& yMin,
-                      const std::vector<CoordType>& yMax) {
-  copyColumnToDevice(device.yMin, yMin);
-  copyColumnToDevice(device.yMax, yMax);
+                      const std::vector<CoordType>& yMax,
+                      cudaStream_t stream) {
+  copyColumnToDevice(device.yMin, yMin, stream);
+  copyColumnToDevice(device.yMax, yMax, stream);
+  ACTS_CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 void copyDeviceToHost(std::vector<CoordType>& yMin,
                       std::vector<CoordType>& yMax,
-                      const CudaHoughPlaneBatchArrays& device) {
-  copyColumnToHost(yMin, device.yMin);
-  copyColumnToHost(yMax, device.yMax);
+                      const CudaHoughPlaneBatchArrays& device,
+                      cudaStream_t stream) {
+  copyColumnToHost(yMin, device.yMin, stream);
+  copyColumnToHost(yMax, device.yMax, stream);
+  ACTS_CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 }  // namespace
@@ -117,7 +121,21 @@ void CudaHoughPlaneBatch::moveToDevice() {
   m_device.nBinsY = static_cast<std::uint32_t>(nBinsY());
 
   allocateDeviceData(m_device, nBuckets());
-  copyHostToDevice(m_device, m_hostYMin, m_hostYMax);
+  copyColumnToDevice(m_device.yMin, m_hostYMin);
+  copyColumnToDevice(m_device.yMax, m_hostYMax);
+
+  m_onDevice = true;
+}
+
+void CudaHoughPlaneBatch::moveToDevice(cudaStream_t stream) {
+  clearDevice();
+
+  m_device.nBuckets = static_cast<std::uint32_t>(nBuckets());
+  m_device.nBinsX = static_cast<std::uint32_t>(nBinsX());
+  m_device.nBinsY = static_cast<std::uint32_t>(nBinsY());
+
+  allocateDeviceData(m_device, nBuckets());
+  copyHostToDevice(m_device, m_hostYMin, m_hostYMax, stream);
 
   m_onDevice = true;
 }
@@ -127,7 +145,16 @@ void CudaHoughPlaneBatch::moveToHost() {
     return;
   }
 
-  copyDeviceToHost(m_hostYMin, m_hostYMax, m_device);
+  copyColumnToHost(m_hostYMin, m_device.yMin);
+  copyColumnToHost(m_hostYMax, m_device.yMax);
+}
+
+void CudaHoughPlaneBatch::moveToHost(cudaStream_t stream) {
+  if (!m_onDevice) {
+    return;
+  }
+
+  copyDeviceToHost(m_hostYMin, m_hostYMax, m_device, stream);
 }
 
 void CudaHoughPlaneBatch::clearDevice() noexcept {

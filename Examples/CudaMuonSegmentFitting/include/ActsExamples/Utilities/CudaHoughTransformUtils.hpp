@@ -84,8 +84,14 @@ class CudaHoughPlaneBatch {
 
   /// @brief Allocate device arrays and copy axis ranges to the device.
   void moveToDevice();
+  /// @brief Allocate device arrays and copy axis ranges using pinned staging
+  /// memory on the supplied CUDA stream.
+  void moveToDevice(cudaStream_t stream);
   /// @brief Copy dynamic axis ranges back to the host.
   void moveToHost();
+  /// @brief Copy dynamic axis ranges using pinned staging memory on the
+  /// supplied CUDA stream.
+  void moveToHost(cudaStream_t stream);
   /// @brief Free device axis-range arrays.
   void clearDevice() noexcept;
 

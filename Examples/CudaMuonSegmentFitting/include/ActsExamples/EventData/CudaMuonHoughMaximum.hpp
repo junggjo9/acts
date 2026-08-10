@@ -135,15 +135,18 @@ class CudaHoughMaximumBatch {
   ///
   /// Copies nMaxima and nAssociatedHits from the device.
   void copyAssociationMetadataToHost();
+  void copyAssociationMetadataToHost(cudaStream_t stream);
 
   /// Calculate CSR offsets from the copied association counts and allocate
   /// exact associated-hit storage on the device.
   void allocateAssociationStorage();
+  void allocateAssociationStorage(cudaStream_t stream);
 
   /// Copy the associated space-point indices from the device to the host.
   ///
   /// This is called after the association-fill kernel has completed.
   void copyAssociatedHitIndicesToHost();
+  void copyAssociatedHitIndicesToHost(cudaStream_t stream);
 
   /// Return the number of associated input space points for one maximum.
   size_type nAssociatedHits(size_type bucket, size_type maximum) const;
@@ -163,9 +166,11 @@ class CudaHoughMaximumBatch {
 
   /// Allocate device storage and copy host data to it.
   void moveToDevice();
+  void moveToDevice(cudaStream_t stream);
 
   /// Copy device data back into host storage.
   void moveToHost();
+  void moveToHost(cudaStream_t stream);
 
   /// Reset the per-bucket maximum counters on the device.
   ///
@@ -223,6 +228,9 @@ class CudaHoughMaximumBatch {
 
   void checkBucket(size_type bucket) const;
   void checkMaximum(size_type bucket, size_type maximum) const;
+
+  /// Build host-side CSR offsets and resize the exact hit-index storage.
+  void prepareAssociationStorageHost();
 
   /// Release only the variable-size association offset/index storage.
   void clearAssociationStorage() noexcept;

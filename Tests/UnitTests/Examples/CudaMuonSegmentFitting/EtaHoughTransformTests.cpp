@@ -252,11 +252,11 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_drift_circle_global_maximum) {
       -3.0, 3.0, -100.0 * Acts::UnitConstants::m,
       100.0 * Acts::UnitConstants::m};
   CudaHT::CudaHoughPlaneBatch plane{{15u, 15u}, 1u};
+  CudaHT::EtaHoughTransform::Processor processor;
 
-  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<1u>(
-      plane, spacePoints, axisRanges);
-  maxima.moveToHost();
-  plane.moveToHost();
+  auto maxima = processor.run<1u>(plane, spacePoints, axisRanges);
+  maxima.moveToHost(processor.stream());
+  plane.moveToHost(processor.stream());
 
   BOOST_REQUIRE_EQUAL(maxima.nBuckets(), 1u);
   BOOST_REQUIRE_EQUAL(maxima.nMaxima(bucketId), 1u);
@@ -290,11 +290,11 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_counts_overlapping_solutions_once) {
   const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
       -1.0, 1.0, -1.0, 1.0};
   CudaHT::CudaHoughPlaneBatch plane{{1u, 1u}, 1u};
+  CudaHT::EtaHoughTransform::Processor processor;
 
-  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<1u>(
-      plane, spacePoints, axisRanges);
-  maxima.moveToHost();
-  maxima.copyAssociatedHitIndicesToHost();
+  auto maxima = processor.run<1u>(plane, spacePoints, axisRanges);
+  maxima.moveToHost(processor.stream());
+  maxima.copyAssociatedHitIndicesToHost(processor.stream());
 
   BOOST_REQUIRE_EQUAL(maxima.nMaxima(0u), 1u);
   BOOST_CHECK_EQUAL(maxima.nHits(0u, 0u), 2.0f);
@@ -310,11 +310,11 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_strip_global_maximum) {
       -3.0, 3.0, -100.0 * Acts::UnitConstants::m,
       100.0 * Acts::UnitConstants::m};
   CudaHT::CudaHoughPlaneBatch plane{{64u, 32u}, 1u};
+  CudaHT::EtaHoughTransform::Processor processor;
 
-  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<1u>(
-      plane, spacePoints, axisRanges);
-  maxima.moveToHost();
-  maxima.copyAssociatedHitIndicesToHost();
+  auto maxima = processor.run<1u>(plane, spacePoints, axisRanges);
+  maxima.moveToHost(processor.stream());
+  maxima.copyAssociatedHitIndicesToHost(processor.stream());
 
   BOOST_REQUIRE_EQUAL(maxima.nMaxima(0u), 1u);
   BOOST_CHECK_EQUAL(maxima.nHits(0u, 0u), 4.0f);
@@ -334,10 +334,11 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_sliding_window_applies_threshold) {
   const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
       -1.0, 1.0, -1.0, 1.0};
   CudaHT::CudaHoughPlaneBatch plane{{5u, 5u}, 1u};
+  CudaHT::EtaHoughTransform::Processor processor;
 
-  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<
-      8u, CudaHT::PeakFinder::SlidingWindow>(plane, spacePoints, axisRanges);
-  maxima.moveToHost();
+  auto maxima = processor.run<8u, CudaHT::PeakFinder::SlidingWindow>(
+      plane, spacePoints, axisRanges);
+  maxima.moveToHost(processor.stream());
   BOOST_CHECK_EQUAL(maxima.nMaxima(0u), 0u);
 }
 
@@ -347,11 +348,12 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_sliding_window_finds_peak) {
       -3.0, 3.0, -100.0 * Acts::UnitConstants::m,
       100.0 * Acts::UnitConstants::m};
   CudaHT::CudaHoughPlaneBatch plane{{15u, 15u}, 1u};
+  CudaHT::EtaHoughTransform::Processor processor;
 
-  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<
-      8u, CudaHT::PeakFinder::SlidingWindow>(plane, spacePoints, axisRanges);
-  maxima.moveToHost();
-  // Algorithm overcounts maximums to 2 from 1, which is just it's behaviour
+  auto maxima = processor.run<8u, CudaHT::PeakFinder::SlidingWindow>(
+      plane, spacePoints, axisRanges);
+  maxima.moveToHost(processor.stream());
+  // This input produces two adjacent maxima with the reference window.
   BOOST_REQUIRE_EQUAL(maxima.nMaxima(0u), 2u);
   BOOST_CHECK_GE(maxima.nHits(0u, 0u), 1.0f);
 }
@@ -376,24 +378,25 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_three_segments_all_peak_finders) {
   for (const PeakFinderCase& testCase : cases) {
     auto spacePoints = makeThreeSegmentContainer();
     CudaHT::CudaHoughPlaneBatch plane{{64u, 32u}, 1u};
+    CudaHT::EtaHoughTransform::Processor processor;
     auto maxima = [&]() {
       if (testCase.peakFinder == CudaHT::PeakFinder::SlidingWindow) {
-        return CudaHT::EtaHoughTransform::etaHoughTransform<
+        return processor.run<
             4u, CudaHT::PeakFinder::SlidingWindow>(plane, spacePoints,
                                                     axisRanges);
       }
       if (testCase.peakFinder == CudaHT::PeakFinder::RelativeNms) {
-        return CudaHT::EtaHoughTransform::etaHoughTransform<
+        return processor.run<
             4u, CudaHT::PeakFinder::RelativeNms>(plane, spacePoints,
                                                   axisRanges);
       }
-      return CudaHT::EtaHoughTransform::etaHoughTransform<
+      return processor.run<
           4u, CudaHT::PeakFinder::GlobalMaximum>(plane, spacePoints,
                                                   axisRanges);
     }();
 
-    maxima.moveToHost();
-    maxima.copyAssociatedHitIndicesToHost();
+    maxima.moveToHost(processor.stream());
+    maxima.copyAssociatedHitIndicesToHost(processor.stream());
 
     BOOST_TEST_CONTEXT("peak finder: " << testCase.name) {
       BOOST_REQUIRE_EQUAL(maxima.nMaxima(0u), testCase.expectedMaxima);

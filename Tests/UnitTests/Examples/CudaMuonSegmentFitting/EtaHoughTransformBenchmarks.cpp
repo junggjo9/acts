@@ -19,6 +19,7 @@
 #include "ActsExamples/Framework/AlgorithmContext.hpp"
 #include "ActsExamples/Framework/WhiteBoard.hpp"
 #include "ActsExamples/TrackFinding/MuonHoughSeeder.hpp"
+#include "ActsExamples/Utilities/CudaUtilities.hpp"
 #include "ActsExamples/Utilities/tbbWrap.hpp"
 #include "ActsExamples/EventData/CudaMuonSpacePoint.hpp"
 #include "ActsExamples/Utilities/CudaHoughTransformUtils.hpp"
@@ -43,6 +44,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -516,6 +518,273 @@ struct CpuEtaResult {
   double processingSeconds = 0.0;
   std::size_t threadsUsed = 0u;
 };
+
+struct CudaEtaEventInput {
+  std::vector<std::size_t> globalBuckets{};
+  ActsExamples::CudaMuonSpacePointContainer spacePoints;
+  CudaHT::CudaHoughPlaneBatch plane;
+
+  CudaEtaEventInput(
+      std::vector<std::size_t> buckets,
+      ActsExamples::CudaMuonSpacePointContainer input,
+      const Acts::HoughTransformUtils::HoughPlaneConfig& planeConfig)
+      : globalBuckets{std::move(buckets)},
+        spacePoints{std::move(input)},
+        plane{planeConfig, spacePoints.bucketCount()} {}
+};
+
+std::vector<CudaEtaEventInput> makeCudaEtaEventInputs(
+    const EtaValidationBatch& batch,
+    const Acts::HoughTransformUtils::HoughPlaneConfig& planeConfig) {
+  struct EventBuckets {
+    std::vector<std::size_t> buckets{};
+  };
+
+  std::vector<EventBuckets> groupedEvents;
+  std::unordered_map<std::uint32_t, std::size_t> eventIndex;
+  for (std::size_t bucket = 0u; bucket < batch.buckets.size(); ++bucket) {
+    const std::uint32_t eventId = batch.buckets[bucket].eventId;
+    const auto [entry, inserted] =
+        eventIndex.try_emplace(eventId, groupedEvents.size());
+    if (inserted) {
+      groupedEvents.emplace_back();
+    }
+    groupedEvents[entry->second].buckets.push_back(bucket);
+  }
+
+  std::vector<CudaEtaEventInput> result;
+  result.reserve(groupedEvents.size());
+  for (EventBuckets& event : groupedEvents) {
+    const std::size_t nHits =
+        std::accumulate(event.buckets.begin(), event.buckets.end(),
+                        std::size_t{0u}, [&](std::size_t sum, std::size_t bucket) {
+                          return sum + batch.spacePoints.bucketEnd(bucket) -
+                                 batch.spacePoints.bucketStart(bucket);
+                        });
+    ActsExamples::CudaMuonSpacePointContainer eventSpacePoints{nHits};
+
+    std::size_t outputHit = 0u;
+    for (const std::size_t bucket : event.buckets) {
+      const std::size_t outputBegin = outputHit;
+      for (std::size_t hit = batch.spacePoints.bucketStart(bucket);
+           hit < batch.spacePoints.bucketEnd(bucket); ++hit) {
+        const auto input = batch.spacePoints[hit];
+        const auto& covariance = input->covariance();
+        eventSpacePoints.setGeometryId(outputHit, input->geometryId().value());
+        eventSpacePoints.setId(outputHit, input->id().toInt());
+        eventSpacePoints.defineCoordinates(
+            outputHit, input->localPosition(), input->sensorDirection(),
+            input->toNextSensor());
+        eventSpacePoints.setRadius(outputHit, input->driftRadius());
+        eventSpacePoints.setTime(outputHit, input->time());
+        eventSpacePoints.setCovariance(outputHit, covariance[0], covariance[1],
+                                       covariance[2]);
+        ++outputHit;
+      }
+      eventSpacePoints.addBucket(outputBegin, outputHit);
+    }
+
+    result.emplace_back(std::move(event.buckets), std::move(eventSpacePoints),
+                        planeConfig);
+  }
+  return result;
+}
+
+struct CudaEtaEventResult {
+  CpuEtaMaximumBatch maxima;
+  std::vector<double> uploadMilliseconds;
+  std::vector<double> processingMilliseconds;
+  std::vector<double> downloadMilliseconds;
+  std::vector<double> totalMilliseconds;
+  double wallSeconds = 0.0;
+  std::size_t workersUsed = 0u;
+  std::uint32_t maximumBlocksPerEvent = 0u;
+};
+
+CudaEtaEventResult runCudaEtaPerEvent(
+    EtaValidationBatch& batch, std::size_t nBinsX, std::size_t nBinsY,
+    std::string_view peakFinderName,
+    const Acts::HoughTransformUtils::HoughAxisRanges& axisRanges,
+    const Acts::Logger& timerLogger) {
+  constexpr std::size_t maximumCapacityPerBucket = 8u;
+  using BenchmarkClock = Acts::ScopedTimer::clock_type;
+
+  const Acts::HoughTransformUtils::HoughPlaneConfig planeConfig{nBinsX,
+                                                                nBinsY};
+  std::vector<CudaEtaEventInput> events =
+      makeCudaEtaEventInputs(batch, planeConfig);
+
+  std::size_t workerCount = 8u;
+  if (const char* value = std::getenv("ACTS_MUON_CUDA_STREAMS");
+      value != nullptr) {
+    const std::string text{value};
+    std::size_t parsedCharacters = 0u;
+    workerCount = std::stoull(text, &parsedCharacters);
+    if (workerCount == 0u || parsedCharacters != text.size()) {
+      throw std::invalid_argument(
+          "ACTS_MUON_CUDA_STREAMS must be a positive integer");
+    }
+  }
+  workerCount = std::min(workerCount, events.size());
+
+  std::uint32_t maximumBlocksPerEvent = 8u;
+  if (const char* value = std::getenv("ACTS_MUON_CUDA_BLOCKS_PER_EVENT");
+      value != nullptr) {
+    const std::string text{value};
+    std::size_t parsedCharacters = 0u;
+    const std::size_t blocks = std::stoull(text, &parsedCharacters);
+    if (parsedCharacters != text.size() ||
+        blocks > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::invalid_argument(
+          "ACTS_MUON_CUDA_BLOCKS_PER_EVENT must fit into std::uint32_t");
+    }
+    maximumBlocksPerEvent = static_cast<std::uint32_t>(blocks);
+  }
+
+  std::vector<CudaHT::EtaHoughTransform::Processor> workers;
+  workers.reserve(workerCount);
+  for (std::size_t worker = 0u; worker < workerCount; ++worker) {
+    workers.emplace_back();
+  }
+
+  struct EventMaximum {
+    std::size_t globalBucket = 0u;
+    CpuEtaMaximum maximum{};
+  };
+  std::vector<std::vector<EventMaximum>> eventMaxima(events.size());
+
+  CudaEtaEventResult result{
+      CpuEtaMaximumBatch{batch.buckets.size()},
+      std::vector<double>(events.size(), 0.0),
+      std::vector<double>(events.size(), 0.0),
+      std::vector<double>(events.size(), 0.0),
+      std::vector<double>(events.size(), 0.0),
+      0.0,
+      0u,
+      maximumBlocksPerEvent};
+
+  std::atomic<std::size_t> nextWorkerId{0u};
+  tbb::enumerable_thread_specific<std::size_t> workerIds{
+      [&nextWorkerId]() { return nextWorkerId++; }};
+  ActsExamples::tbbWrap::task_arena arena{static_cast<int>(workerCount)};
+  const auto wallStart = BenchmarkClock::now();
+  {
+    Acts::ScopedTimer timer{"CUDA Eta per-event processing", timerLogger};
+    arena.execute([&]() {
+      ActsExamples::tbbWrap::parallel_for(
+          tbb::blocked_range<std::size_t>{0u, events.size()},
+          [&](const tbb::blocked_range<std::size_t>& range) {
+            const std::size_t workerId = workerIds.local();
+            auto& processor = workers.at(workerId);
+            const cudaStream_t stream = processor.stream();
+
+            for (std::size_t event = range.begin(); event < range.end();
+                 ++event) {
+              auto& input = events[event];
+              const auto eventStart = BenchmarkClock::now();
+
+              const auto uploadStart = BenchmarkClock::now();
+              input.spacePoints.moveToDevice(stream);
+              input.plane.moveToDevice(stream);
+              result.uploadMilliseconds[event] =
+                  std::chrono::duration<double, std::milli>(
+                      BenchmarkClock::now() - uploadStart)
+                      .count();
+
+              const auto processingStart = BenchmarkClock::now();
+              auto maxima = [&]() {
+                if (peakFinderName == "sliding-window") {
+                  return processor.run<
+                      maximumCapacityPerBucket,
+                      CudaHT::PeakFinder::SlidingWindow>(
+                      input.plane, input.spacePoints, axisRanges,
+                      ActsExamples::YieldType{1.0}, 128u,
+                      maximumBlocksPerEvent);
+                }
+                if (peakFinderName == "relative-nms") {
+                  return processor.run<maximumCapacityPerBucket,
+                                       CudaHT::PeakFinder::RelativeNms>(
+                      input.plane, input.spacePoints, axisRanges,
+                      ActsExamples::YieldType{1.0}, 128u,
+                      maximumBlocksPerEvent);
+                }
+                return processor.run<maximumCapacityPerBucket,
+                                     CudaHT::PeakFinder::GlobalMaximum>(
+                    input.plane, input.spacePoints, axisRanges,
+                    ActsExamples::YieldType{1.0}, 128u,
+                    maximumBlocksPerEvent);
+              }();
+              result.processingMilliseconds[event] =
+                  std::chrono::duration<double, std::milli>(
+                      BenchmarkClock::now() - processingStart)
+                      .count();
+
+              const auto downloadStart = BenchmarkClock::now();
+              maxima.moveToHost(stream);
+              maxima.copyAssociatedHitIndicesToHost(stream);
+              result.downloadMilliseconds[event] =
+                  std::chrono::duration<double, std::milli>(
+                      BenchmarkClock::now() - downloadStart)
+                      .count();
+              result.totalMilliseconds[event] =
+                  std::chrono::duration<double, std::milli>(
+                      BenchmarkClock::now() - eventStart)
+                      .count();
+
+              auto& output = eventMaxima[event];
+              for (std::size_t localBucket = 0u;
+                   localBucket < input.globalBuckets.size(); ++localBucket) {
+                const std::size_t globalBucket =
+                    input.globalBuckets[localBucket];
+                const std::size_t localBucketStart =
+                    input.spacePoints.bucketStart(localBucket);
+                const std::size_t localBucketEnd =
+                    input.spacePoints.bucketEnd(localBucket);
+                const std::size_t globalBucketStart =
+                    batch.spacePoints.bucketStart(globalBucket);
+
+                for (std::size_t maximum = 0u;
+                     maximum < maxima.nMaxima(localBucket); ++maximum) {
+                  CpuEtaMaximum converted{};
+                  converted.tanBeta = maxima.tanBeta(localBucket, maximum);
+                  converted.interceptY =
+                      maxima.interceptY(localBucket, maximum);
+                  converted.nHits = maxima.nHits(localBucket, maximum);
+                  converted.nLayers = maxima.nLayers(localBucket, maximum);
+                  for (const std::uint32_t localHit :
+                       maxima.associatedHitIndices(localBucket, maximum)) {
+                    if (localHit < localBucketStart ||
+                        localHit >= localBucketEnd) {
+                      throw std::runtime_error(
+                          "Per-event CUDA maximum references another bucket");
+                    }
+                    converted.associatedHitIndices.push_back(
+                        static_cast<std::uint32_t>(
+                            globalBucketStart + localHit - localBucketStart));
+                  }
+                  output.push_back({globalBucket, std::move(converted)});
+                }
+              }
+
+              // Event device allocations are deliberately not retained or
+              // cached for the next event.
+              input.spacePoints.clearDevice();
+              input.plane.clearDevice();
+            }
+          });
+    });
+  }
+  result.wallSeconds =
+      std::chrono::duration<double>(BenchmarkClock::now() - wallStart).count();
+  result.workersUsed = nextWorkerId.load();
+
+  for (auto& maxima : eventMaxima) {
+    for (auto& [globalBucket, maximum] : maxima) {
+      result.maxima.add(globalBucket, std::move(maximum));
+    }
+  }
+  return result;
+}
 
 CpuEtaResult runOriginalCpuEta(EtaValidationBatch& batch,
                                std::size_t nBinsX, std::size_t nBinsY,
@@ -1027,6 +1296,62 @@ void runEtaValidation(EtaValidationBatch& batch,
 
   const std::size_t nBinsX = configuredBins("ACTS_MUON_ETA_BINS_X", 64u);
   const std::size_t nBinsY = configuredBins("ACTS_MUON_ETA_BINS_Y", 32u);
+  const char* benchmarkModeEnvironment =
+      std::getenv("ACTS_MUON_CUDA_BENCHMARK_MODE");
+  const std::string benchmarkMode = benchmarkModeEnvironment != nullptr
+                                        ? benchmarkModeEnvironment
+                                        : "bulk";
+  BOOST_REQUIRE_MESSAGE(
+      benchmarkMode == "bulk" || benchmarkMode == "per-event",
+      "ACTS_MUON_CUDA_BENCHMARK_MODE must be 'bulk' or 'per-event'");
+
+  if (benchmarkMode == "per-event") {
+    std::cout << "Running " << validationName << " event by event with "
+              << nBinsX << " x " << nBinsY << " bins using "
+              << peakFinderName << std::endl;
+    CudaEtaEventResult result =
+        runCudaEtaPerEvent(batch, nBinsX, nBinsY, peakFinderName, axisRanges,
+                           *timerLogger);
+
+    const auto mean = [](const std::vector<double>& values) {
+      return values.empty()
+                 ? 0.0
+                 : std::accumulate(values.begin(), values.end(), 0.0) /
+                       static_cast<double>(values.size());
+    };
+    const double bucketsPerSecond =
+        result.wallSeconds > 0.0
+            ? static_cast<double>(nBuckets) / result.wallSeconds
+            : 0.0;
+    const double wallMillisecondsPerEvent =
+        nEvents == 0u
+            ? 0.0
+            : 1000.0 * result.wallSeconds / static_cast<double>(nEvents);
+
+    std::cout << "Eta CUDA event workers/streams used: "
+              << result.workersUsed << std::endl;
+    std::cout << "Eta CUDA maximum blocks per event: ";
+    if (result.maximumBlocksPerEvent == 0u) {
+      std::cout << "automatic" << std::endl;
+    } else {
+      std::cout << result.maximumBlocksPerEvent << std::endl;
+    }
+    std::cout << "Eta timing GPU upload mean event latency: "
+              << mean(result.uploadMilliseconds) << " ms" << std::endl;
+    std::cout << "Eta timing GPU processing mean event latency: "
+              << mean(result.processingMilliseconds) << " ms" << std::endl;
+    std::cout << "Eta timing GPU download mean event latency: "
+              << mean(result.downloadMilliseconds) << " ms" << std::endl;
+    std::cout << "Eta timing GPU complete mean event latency: "
+              << mean(result.totalMilliseconds) << " ms" << std::endl;
+    std::cout << "Eta timing GPU wall time per event: "
+              << wallMillisecondsPerEvent << " ms" << std::endl;
+    std::cout << "Eta transform wall time: " << result.wallSeconds << " s ("
+              << bucketsPerSecond << " buckets/s)" << std::endl;
+    writeEtaValidation(batch, result.maxima, outputPath);
+    return;
+  }
+
   CudaHT::CudaHoughPlaneBatch plane{{nBinsX, nBinsY}, nBuckets};
   std::cout << "Running " << validationName << " with " << plane.nBinsX()
             << " x " << plane.nBinsY() << " bins for " << nBuckets
@@ -1045,11 +1370,6 @@ void runEtaValidation(EtaValidationBatch& batch,
       Acts::ScopedTimer uploadTimer{"CUDA Eta host-to-device", *timerLogger};
       batch.spacePoints.moveToDevice();
       plane.moveToDevice();
-      const cudaError_t status = cudaDeviceSynchronize();
-      if (status != cudaSuccess) {
-        throw std::runtime_error(std::string{"CUDA upload failed: "} +
-                                 cudaGetErrorString(status));
-      }
     }
     uploadSeconds = elapsedSeconds(uploadStart, BenchmarkClock::now());
 
@@ -1078,11 +1398,6 @@ void runEtaValidation(EtaValidationBatch& batch,
       Acts::ScopedTimer downloadTimer{"CUDA Eta device-to-host", *timerLogger};
       result.moveToHost();
       result.copyAssociatedHitIndicesToHost();
-      const cudaError_t status = cudaDeviceSynchronize();
-      if (status != cudaSuccess) {
-        throw std::runtime_error(std::string{"CUDA download failed: "} +
-                                 cudaGetErrorString(status));
-      }
     }
     downloadSeconds = elapsedSeconds(downloadStart, BenchmarkClock::now());
 
@@ -1159,6 +1474,11 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_file_validation) {
   // original CPU Eta transform. ACTS_MUON_CUDA_PEAK_FINDER selects the CUDA
   // peak finder. ACTS_MUON_ETA_BINS_X and ACTS_MUON_ETA_BINS_Y can force
   // common binning for a like-for-like timing comparison.
+  // ACTS_MUON_CUDA_BENCHMARK_MODE selects the original bulk measurement or
+  // event-granular processing, while ACTS_MUON_CUDA_STREAMS controls how many
+  // per-worker CUDA processors are used by the latter.
+  // ACTS_MUON_CUDA_BLOCKS_PER_EVENT limits the CUDA grids for each event; zero
+  // preserves their default launch sizes.
   const char* environmentPath =
       std::getenv("ACTS_MUON_VALIDATION_FLAT_ROOT");
 
