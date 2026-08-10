@@ -25,6 +25,8 @@ namespace {
 using ActsExamples::CudaHoughMaximumBatchArrays;
 using ActsExamples::CudaMuonSpacePointArrays;
 using ActsExamples::detLayer;
+using ActsExamples::muonIdIsMdt;
+using ActsExamples::muonIdMeasuresEta;
 
 using ActsExamples::CudaHoughTransformUtils::CoordType;
 using ActsExamples::CudaHoughTransformUtils::CudaHoughPlaneBatchArrays;
@@ -35,6 +37,7 @@ using ActsExamples::CudaHoughTransformUtils::YieldType;
 
 constexpr CoordType etaWidthScale = 1.0;  // mm
 constexpr CoordType etaMaxWidth = 1.0;    // mm
+constexpr CoordType etaStripWidthScale = 3.0;
 
 __device__ inline CoordType etaYHalfWidth(const HoughAxisRanges& ranges,
                                           std::uint32_t nBinsX, CoordType z,
@@ -60,6 +63,11 @@ __device__ inline CoordType etaYHalfWidth(const HoughAxisRanges& ranges,
   }
 
   return geometricWidth + measurementWidth;
+}
+
+__device__ inline CoordType etaStripHalfWidth(CoordType covariance) {
+  return sqrt(covariance > CoordType{0.0} ? covariance : CoordType{0.0}) *
+         etaStripWidthScale;
 }
 
 namespace HoughDetail = ActsExamples::CudaHoughTransformUtils::detail;
@@ -101,16 +109,30 @@ __device__ inline bool etaHitContributesToMaximum(
   const CoordType tanTheta = HoughDetail::binCenterDevice(
       ranges.xMin, ranges.xMax, plane.nBinsX, selectedXBin);
 
+  const std::uint32_t rawId = spacePoints.muonId[hitIndex];
+  if (!muonIdMeasuresEta(rawId)) {
+    return false;
+  }
+  const bool isMdt = muonIdIsMdt(rawId);
+
   const CoordType y = spacePoints.localPositionY[hitIndex];
   const CoordType z = spacePoints.localPositionZ[hitIndex];
-  const CoordType radius = spacePoints.driftRadius[hitIndex];
+  const CoordType radius =
+      isMdt ? spacePoints.driftRadius[hitIndex] : CoordType{0.0};
   const CoordType covariance = spacePoints.covariance1[hitIndex];
 
   // Must use the same width definition as Hough filling.
-  const CoordType width = etaYHalfWidth(ranges, plane.nBinsX, z, radius,
-                                        covariance, widthScale, maxWidth);
+  const CoordType width =
+      isMdt ? etaYHalfWidth(ranges, plane.nBinsX, z, radius, covariance,
+                            widthScale, maxWidth)
+            : etaStripHalfWidth(covariance);
 
   const CoordType centralIntercept = y - tanTheta * z;
+
+  if (!isMdt) {
+    return yBinInsideBand(selectedYBin, centralIntercept, width, ranges,
+                          plane.nBinsY);
+  }
 
   const CoordType projectedRadius =
       radius * sqrt(CoordType{1.0} + tanTheta * tanTheta);
@@ -125,7 +147,7 @@ __device__ inline bool etaHitContributesToMaximum(
                         plane.nBinsY);
 }
 
-__global__ void computeEtaInterceptRangesMdtBatchKernel(
+__global__ void computeEtaInterceptRangesBatchKernel(
     CudaHoughPlaneBatchArrays plane, CudaMuonSpacePointArrays spacePoints,
     HoughAxisRanges baseRanges, CoordType interceptMargin) {
   const std::uint32_t bucket = blockIdx.x;
@@ -150,6 +172,9 @@ __global__ void computeEtaInterceptRangesMdtBatchKernel(
 
   for (std::uint32_t hit = bucketStart + threadIdx.x; hit < bucketEnd;
        hit += blockDim.x) {
+    if (!muonIdMeasuresEta(spacePoints.muonId[hit])) {
+      continue;
+    }
     const CoordType y = spacePoints.localPositionY[hit];
 
     localMinimum = minimum(localMinimum, y - interceptMargin);
@@ -194,7 +219,7 @@ __global__ void computeEtaInterceptRangesMdtBatchKernel(
 }
 
 template <PeakFinder peakFinder>
-__global__ void fillEtaDriftCirclesMdtBatchKernel(
+__global__ void fillEtaSpacePointsBatchKernel(
     CudaHoughPlaneBatchArrays plane, CudaMuonSpacePointArrays spacePoints,
     CudaHoughMaximumBatchArrays maxima, HoughAxisRanges baseRanges,
     CoordType widthScale, CoordType maxWidth, YieldType weight) {
@@ -281,6 +306,12 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
       const std::uint32_t hitIndex = bucketStart + localHit;
 
+      const std::uint32_t rawId = spacePoints.muonId[hitIndex];
+      if (!muonIdMeasuresEta(rawId)) {
+        continue;
+      }
+      const bool isMdt = muonIdIsMdt(rawId);
+
       const CoordType tanTheta = HoughDetail::binCenterDevice(
           ranges.xMin, ranges.xMax, plane.nBinsX, xBin);
 
@@ -288,7 +319,8 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
       const CoordType z = spacePoints.localPositionZ[hitIndex];
 
-      const CoordType radius = spacePoints.driftRadius[hitIndex];
+      const CoordType radius =
+          isMdt ? spacePoints.driftRadius[hitIndex] : CoordType{0.0};
 
       const CoordType centralIntercept = y - tanTheta * z;
 
@@ -301,10 +333,22 @@ __global__ void fillEtaDriftCirclesMdtBatchKernel(
 
       const CoordType covariance = spacePoints.covariance1[hitIndex];
 
-      const unsigned layer = detLayer(spacePoints.muonId[hitIndex]);
+      const unsigned layer = detLayer(rawId);
 
-      const CoordType width = etaYHalfWidth(ranges, plane.nBinsX, z, radius,
-                                            covariance, widthScale, maxWidth);
+      const CoordType width =
+          isMdt ? etaYHalfWidth(ranges, plane.nBinsX, z, radius, covariance,
+                                widthScale, maxWidth)
+                : etaStripHalfWidth(covariance);
+
+      if (!isMdt) {
+        const HoughDetail::YBinRange stripBand =
+            HoughDetail::fillSharedYBand(
+                sharedHits, sharedLayers, sharedLayerMask, plane, ranges, xBin,
+                centralIntercept, width, layer, weight);
+        HoughDetail::countSharedYBand(sharedAssociatedHits, plane.nBinsX, xBin,
+                                      stripBand);
+        continue;
+      }
 
       // 2.5.2 Fill both solution bands. The accumulator deliberately counts
       // both contributions, including an overlap between the two bands.
@@ -559,7 +603,7 @@ void etaHoughTransformImpl(CudaHoughPlaneBatch& plane,
   const std::size_t rangeSharedBytes =
       2u * static_cast<std::size_t>(threadsPerBlock) * sizeof(CoordType);
 
-  computeEtaInterceptRangesMdtBatchKernel<<<
+  computeEtaInterceptRangesBatchKernel<<<
       static_cast<unsigned>(plane.nBuckets()),
       static_cast<unsigned>(threadsPerBlock), rangeSharedBytes>>>(
       plane.deviceArrays(), spacePoints.deviceArrays(), axisRanges,
@@ -568,19 +612,19 @@ void etaHoughTransformImpl(CudaHoughPlaneBatch& plane,
   ACTS_CUDA_CHECK(cudaGetLastError());
 
   if (peakFinder == PeakFinder::GlobalMaximum) {
-    fillEtaDriftCirclesMdtBatchKernel<PeakFinder::GlobalMaximum>
+    fillEtaSpacePointsBatchKernel<PeakFinder::GlobalMaximum>
         <<<static_cast<unsigned>(numBlocks),
            static_cast<unsigned>(threadsPerBlock), sharedBytes>>>(
             plane.deviceArrays(), spacePoints.deviceArrays(), maxima,
             axisRanges, etaWidthScale, etaMaxWidth, weight);
   } else if (peakFinder == PeakFinder::SlidingWindow) {
-    fillEtaDriftCirclesMdtBatchKernel<PeakFinder::SlidingWindow>
+    fillEtaSpacePointsBatchKernel<PeakFinder::SlidingWindow>
         <<<static_cast<unsigned>(numBlocks),
            static_cast<unsigned>(threadsPerBlock), sharedBytes>>>(
             plane.deviceArrays(), spacePoints.deviceArrays(), maxima,
             axisRanges, etaWidthScale, etaMaxWidth, weight);
   } else if (peakFinder == PeakFinder::RelativeNms) {
-    fillEtaDriftCirclesMdtBatchKernel<PeakFinder::RelativeNms>
+    fillEtaSpacePointsBatchKernel<PeakFinder::RelativeNms>
         <<<static_cast<unsigned>(numBlocks),
            static_cast<unsigned>(threadsPerBlock), sharedBytes>>>(
             plane.deviceArrays(), spacePoints.deviceArrays(), maxima,

@@ -156,6 +156,17 @@ __device__ inline YBinRange fillSharedYBand(
   return band;
 }
 
+/// @brief Count one associated hit in every cell covered by a Y band.
+__device__ inline void countSharedYBand(
+    std::uint32_t* sharedAssociatedHits, std::uint32_t nBinsX,
+    std::uint32_t xBin, YBinRange band) {
+  for (int yBin = band.down; yBin <= band.up; ++yBin) {
+    const std::uint32_t localBin =
+        static_cast<std::uint32_t>(yBin) * nBinsX + xBin;
+    atomicAdd(&sharedAssociatedHits[localBin], 1u);
+  }
+}
+
 /// @brief Count one hit in the union of two Y bands.
 ///
 /// The two drift-circle solutions are filled independently in the Hough
@@ -166,11 +177,7 @@ __device__ inline YBinRange fillSharedYBand(
 __device__ inline void countSharedDistinctYBands(
     std::uint32_t* sharedAssociatedHits, std::uint32_t nBinsX,
     std::uint32_t xBin, YBinRange first, YBinRange second) {
-  for (int yBin = first.down; yBin <= first.up; ++yBin) {
-    const std::uint32_t localBin =
-        static_cast<std::uint32_t>(yBin) * nBinsX + xBin;
-    atomicAdd(&sharedAssociatedHits[localBin], 1u);
-  }
+  countSharedYBand(sharedAssociatedHits, nBinsX, xBin, first);
 
   // Only count the parts of the second band not already covered by the first.
   for (int yBin = second.down; yBin <= second.up; ++yBin) {

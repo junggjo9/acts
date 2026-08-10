@@ -51,6 +51,21 @@ __host__ __device__ inline unsigned detLayer(std::uint32_t rawId) noexcept {
   return static_cast<unsigned>((rawId >> layerShift) & fourBit);
 }
 
+/// Return whether a raw MuonId identifies an MDT measurement.
+__host__ __device__ inline bool muonIdIsMdt(std::uint32_t rawId) noexcept {
+  static constexpr std::uint32_t threeBit = 0x7u;
+  static constexpr std::uint32_t technologyShift = 5u;
+  static constexpr std::uint32_t mdtTechnology = 0u;
+  return ((rawId >> technologyShift) & threeBit) == mdtTechnology;
+}
+
+/// Return whether a raw MuonId measures the precision (Eta) coordinate.
+__host__ __device__ inline bool muonIdMeasuresEta(
+    std::uint32_t rawId) noexcept {
+  static constexpr std::uint32_t etaFlag = 1u << 14u;
+  return (rawId & etaFlag) != 0u;
+}
+
 /// @brief Device-side raw structure-of-arrays view.
 ///
 /// This structure does not own memory. It only stores raw device pointers.

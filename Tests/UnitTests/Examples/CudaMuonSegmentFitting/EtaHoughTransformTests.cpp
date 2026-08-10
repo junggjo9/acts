@@ -40,6 +40,16 @@ struct DriftCircleInput {
   double uncertainty;
 };
 
+std::uint32_t etaMuonId(
+    ActsExamples::MuonSpacePoint::MuonId::TechField technology) {
+  using MuonId = ActsExamples::MuonSpacePoint::MuonId;
+  MuonId id{};
+  id.setChamber(MuonId::StationName::BIS, MuonId::DetSide::A, 1u,
+                technology);
+  id.setCoordFlags(true, false);
+  return id.toInt();
+}
+
 std::vector<DriftCircleInput> driftCircleInputs() {
   constexpr double uncertainty = 0.3;
   return {
@@ -67,7 +77,9 @@ ActsExamples::CudaMuonSpacePointContainer makeBatchedDriftCircleContainer(
       const DriftCircleInput& driftCircle = driftCircles[local];
 
       container.setGeometryId(index, index);
-      container.setId(index, 0u);
+      container.setId(
+          index, etaMuonId(
+                     ActsExamples::MuonSpacePoint::MuonId::TechField::Mdt));
       container.defineCoordinates(
           index,
           Acts::Vector3{0.0, driftCircle.y + bucketYOffset, driftCircle.z},
@@ -121,7 +133,9 @@ ActsExamples::CudaMuonSpacePointContainer makeThreeSegmentContainer() {
       const double y = segment.tanBeta * z + segment.y0;
 
       container.setGeometryId(hit, hit);
-      container.setId(hit, 0u);
+      container.setId(
+          hit, etaMuonId(
+                   ActsExamples::MuonSpacePoint::MuonId::TechField::Mdt));
       container.defineCoordinates(hit, Acts::Vector3{0.0, y, z},
                                   Acts::Vector3{1.0, 0.0, 0.0},
                                   Acts::Vector3{0.0, 1.0, 0.0});
@@ -135,6 +149,36 @@ ActsExamples::CudaMuonSpacePointContainer makeThreeSegmentContainer() {
   }
 
   container.addBucket(0u, nHits);
+  return container;
+}
+
+ActsExamples::CudaMuonSpacePointContainer makeStripSegmentContainer() {
+  constexpr std::array<double, 4u> zPositions{-60.0, -20.0, 20.0, 60.0};
+  // Exact X-bin centre for the 64-bin test plane below.
+  constexpr double tanBeta = 0.515625;
+  constexpr double interceptY = 20.0;
+  constexpr double uncertainty = 0.1;
+
+  ActsExamples::CudaMuonSpacePointContainer container{zPositions.size()};
+  const std::uint32_t stripId =
+      etaMuonId(ActsExamples::MuonSpacePoint::MuonId::TechField::Rpc);
+
+  for (std::size_t hit = 0u; hit < zPositions.size(); ++hit) {
+    const double z = zPositions[hit];
+    const double y = tanBeta * z + interceptY;
+    container.setGeometryId(hit, hit);
+    container.setId(hit, stripId);
+    container.defineCoordinates(hit, Acts::Vector3{0.0, y, z},
+                                Acts::Vector3{1.0, 0.0, 0.0},
+                                Acts::Vector3{0.0, 1.0, 0.0});
+    container.setRadius(hit, 0.0);
+    container.setTime(hit, 0.0);
+    container.setCovariance(hit, uncertainty * uncertainty,
+                            uncertainty * uncertainty, 0.0);
+    container.setLogicalLayer(hit, static_cast<std::uint32_t>(hit));
+  }
+
+  container.addBucket(0u, zPositions.size());
   return container;
 }
 
@@ -258,6 +302,30 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_counts_overlapping_solutions_once) {
   const auto associated = maxima.associatedHitIndices(0u, 0u);
   BOOST_REQUIRE_EQUAL(associated.size(), 1u);
   BOOST_CHECK_EQUAL(associated.front(), 0u);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_hough_eta_strip_global_maximum) {
+  auto spacePoints = makeStripSegmentContainer();
+  const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
+      -3.0, 3.0, -100.0 * Acts::UnitConstants::m,
+      100.0 * Acts::UnitConstants::m};
+  CudaHT::CudaHoughPlaneBatch plane{{64u, 32u}, 1u};
+
+  auto maxima = CudaHT::EtaHoughTransform::etaHoughTransform<1u>(
+      plane, spacePoints, axisRanges);
+  maxima.moveToHost();
+  maxima.copyAssociatedHitIndicesToHost();
+
+  BOOST_REQUIRE_EQUAL(maxima.nMaxima(0u), 1u);
+  BOOST_CHECK_EQUAL(maxima.nHits(0u, 0u), 4.0f);
+  BOOST_CHECK_EQUAL(maxima.nLayers(0u, 0u), 4.0f);
+  BOOST_CHECK_EQUAL(maxima.nAssociatedHits(0u, 0u), 4u);
+
+  const auto associated = maxima.associatedHitIndices(0u, 0u);
+  BOOST_REQUIRE_EQUAL(associated.size(), 4u);
+  for (std::uint32_t hit = 0u; hit < 4u; ++hit) {
+    BOOST_CHECK(std::ranges::find(associated, hit) != associated.end());
+  }
 }
 
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_sliding_window_applies_threshold) {
