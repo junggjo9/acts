@@ -63,8 +63,9 @@ const Eigen::Matrix<double, eBoundSize, 2> phiThetaProjector = [] {
   return m;
 }();
 
-// A projector used for scattering and energy loss. By using Jacobian * phiThetaQOverPProjector one
-// gets the derivatives for the variables phi, theta, and q/p.
+// A projector used for scattering and energy loss. By using Jacobian *
+// phiThetaQOverPProjector one gets the derivatives for the variables phi,
+// theta, and q/p.
 const Eigen::Matrix<double, eBoundSize, 3> phiThetaQOverPProjector = [] {
   Eigen::Matrix<double, eBoundSize, 3> m =
       Eigen::Matrix<double, eBoundSize, 3>::Zero();
@@ -75,6 +76,112 @@ const Eigen::Matrix<double, eBoundSize, 3> phiThetaQOverPProjector = [] {
 }();
 
 }  // namespace Gx2fConstants
+
+/// @brief A container to store material properties for each material surface
+///
+/// This struct holds the scattering angles, the inverse covariance of the
+/// material, and a validity flag indicating whether the material is valid for
+/// the scattering process.
+struct MaterialProperties {
+  /// Auxiliary struct to include the measured energy loss at a surface. If the
+  /// fitter reaches a surface
+  /// with material a delegate is called to evaluate the measured energy loss at
+  /// the surface. If the struct is valid the measured loss and its associated
+  /// uncertainty are plugged into the chi2 system. Otherwise, the energy loss
+  /// from the tracking geometry material is taken.
+  struct ELossAtSurface {
+    /// Flag toggling whether the parameters are valid
+    bool isValid{false};
+    /// the amount of lost energy at a given surface
+    double lostEnergy{0.};
+    /// the uncertainty on the lost energy
+    double invLossSigma{0.};
+
+    /// Default constructor to construct an invalid energy loss
+    ELossAtSurface() = default;
+    /// Constructor taking the measured energy loss and its uncertainty
+    /// @param energy: The measured lost energy at the corresponding surface
+    /// @param sigma: The uncertainty on the measured lost energy
+    explicit ELossAtSurface(const double energy, const double sigma)
+        : isValid{std::min(energy, sigma) > Acts::s_epsilon},
+          lostEnergy{energy},
+          invLossSigma{isValid ? 1. / sigma : 0.} {}
+  };
+
+  /// Auxiliary struct to describe the material scattering at a surface
+  struct ScatteringAtSurface {
+    /// Flag toggling whether the scatterer is valid
+    bool isValid{false};
+    /// The inverse uncertainty on the scattering angles calculated
+    /// using e.g. the Highland formula
+    double invSigma{0.};
+    /// Default constructor to construct an invalid scatterer
+    ScatteringAtSurface() = default;
+    /// Constructor taking the width of the scatterer
+    explicit ScatteringAtSurface(const double sigma)
+        : isValid{sigma > Acts::s_epsilon},
+          invSigma{isValid ? 1. / sigma : 0.} {}
+  };
+
+  /// @brief Constructor to initialize material properties.
+  ///
+  /// @param pramIdx: Index of the first material parameter inside the extended vector
+  /// @param scatteringAngles_ The vector of scattering angles.
+  /// @param invCovarianceMaterial_ The inverse covariance of the material.
+  /// @param materialIsValid_ A boolean flag indicating whether the material is valid.
+  explicit MaterialProperties(const std::size_t paramIdx,
+                              ScatteringAtSurface&& scatterer,
+                              ELossAtSurface&& eLoss)
+      : m_idx{paramIdx},
+        m_scatterer{std::move(scatterer)},
+        m_eloss{std::move(eLoss)} {}
+
+  /// @brief Accessor for the scattering angles (const version)
+  /// @return Const reference to the vector of scattering angles
+  const BoundVector& scatteringAngles() const { return m_scatteringAngles; }
+
+  /// @brief Accessor for the scattering angles (mutable version)
+  /// @return Mutable reference to the vector of scattering angles for modification
+  BoundVector& scatteringAngles() { return m_scatteringAngles; }
+
+  /// @brief Accessor for the inverse covariance of the material
+  /// @return Inverse covariance value computed from material properties (e.g., Highland formula)
+  // double invCovarianceMaterial() const { return m_invCovarianceMaterial; }
+
+  /// @brief Accessor for the material validity flag
+  /// @return True if material is valid for scattering calculations, false for vacuum or zero thickness
+  bool materialIsValid() const {
+    return m_scatterer.isValid || m_eloss.isValid;
+  }
+
+  /// Number of dimensions from the material scatterer
+  /// @return Number of dimensions from the material scatterer to the parameter vector
+  std::size_t nDim() const {
+    return (m_scatterer.isValid ? 2ul : 0ul) + (m_eloss.isValid ? 1ul : 0ul);
+  }
+  /// First index of the material properties inside the parameter vector
+  /// @return The index inside the parameter vector where the material
+  ///         parameters are stored
+  constexpr std::size_t index() const { return m_idx; }
+
+ private:
+  /// Vector of scattering angles. The vector is usually all zeros except for
+  /// eBoundPhi and eBoundTheta.
+  BoundVector m_scatteringAngles{BoundVector::Zero()};
+  /// Description of the scattering angles
+  ScatteringAtSurface m_scatterer{};
+  /// Description of the energy loss
+  ELossAtSurface m_eloss{};
+
+  /// Index of the first parameter inside the parameter vector
+  std::size_t m_idx{0ul};
+  /// Parametrized lost energy (fit parameter)
+  double m_elossParam{0.};
+
+  // /// Inverse covariance of the material. Compute with e.g. the Highland
+  // /// formula.
+  // double m_invCovarianceMaterial;
+};
 
 /// Extension struct which holds delegates to customise the GX2F behaviour
 template <typename traj_t>
@@ -92,21 +199,19 @@ struct Gx2FitterExtensions {
       Delegate<void(const GeometryContext&, const CalibrationContext&,
                     const SourceLink&, TrackStateProxy)>;
 
-  /// Type alias for updater delegate to incorporate measurements into track
-  /// parameters
-  using Updater = Delegate<Result<void>(const GeometryContext&, TrackStateProxy,
-                                        const Logger&)>;
-
   /// Type alias for outlier finder delegate to identify measurement outliers
   using OutlierFinder = Delegate<bool(ConstTrackStateProxy)>;
 
+  /// Type alias to measure the energy loss at a given surface
+  using ELossAccumulator = Delegate<MaterialProperties::ELossAtSurface(
+      const CalibrationContext&, const Vector3& pos, const Vector3& dir,
+      const Surface& matSurf)>;
+
+  ELossAccumulator elossAccumulator;
   /// The Calibrator is a dedicated calibration algorithm that allows
   /// to calibrate measurements using track information, this could be
   /// e.g. sagging for wires, module deformations, etc.
   Calibrator calibrator;
-
-  /// The updater incorporates measurement information into the track parameters
-  Updater updater;
 
   /// Determines whether a measurement is supposed to be considered as an
   /// outlier
@@ -118,7 +223,6 @@ struct Gx2FitterExtensions {
   /// Default constructor which connects the default void components
   Gx2FitterExtensions() {
     calibrator.template connect<&Acts::detail::voidFitterCalibrator<traj_t>>();
-    updater.template connect<&Acts::detail::voidFitterUpdater<traj_t>>();
     outlierFinder.template connect<&Acts::detail::voidOutlierFinder<traj_t>>();
     surfaceAccessor.connect<&Acts::detail::voidSurfaceAccessor>();
   }
@@ -159,8 +263,8 @@ struct Gx2FitterOptions {
         extensions(extensions_),
         propagatorPlainOptions(pOptions),
         referenceSurface(rSurface),
-        multipleScattering(mScattering),
-        energyLoss(eLoss),
+        doMultipleScattering(mScattering),
+        doEnergyLoss(eLoss),
         freeToBoundCorrection(freeToBoundCorrection_),
         nUpdateMax(nUpdateMax_),
         relChi2changeCutOff(relChi2changeCutOff_) {}
@@ -185,10 +289,10 @@ struct Gx2FitterOptions {
   const Surface* referenceSurface = nullptr;
 
   /// Whether to consider multiple scattering
-  bool multipleScattering = false;
+  bool doMultipleScattering = false;
 
   /// Whether to consider energy loss
-  bool energyLoss = false;
+  bool doEnergyLoss = false;
 
   /// Whether to include non-linear correction during global to local
   /// transformation
@@ -219,23 +323,23 @@ struct Gx2FitterResult {
   /// Acts::TrackTraits::kInvalid is the start of a trajectory.
   std::size_t lastTrackIndex = Acts::kTrackIndexInvalid;
 
-  /// The optional Parameters at the provided surface
-  std::optional<BoundTrackParameters> fittedParameters;
-
   /// Counter for states with non-outlier measurements
-  std::size_t measurementStates = 0;
+  std::size_t measurementStates{0ul};
 
   /// Counter for measurements holes
   /// A hole correspond to a surface with an associated detector element with no
   /// associated measurement. Holes are only taken into account if they are
   /// between the first and last measurements.
-  std::size_t measurementHoles = 0;
+  std::size_t measurementHoles{0ul};
 
   /// Counter for handled states
-  std::size_t processedStates = 0;
+  std::size_t processedStates{0ul};
 
   /// Counter for handled measurements
-  std::size_t processedMeasurements = 0;
+  std::size_t processedMeasurements{0ul};
+
+  /// Index of the next material parameter
+  std::size_t materialParamIdx{eBoundSize};
 
   /// Indicator if track fitting has been done
   bool finished = false;
@@ -243,95 +347,8 @@ struct Gx2FitterResult {
   /// Measurement surfaces without hits
   std::vector<const Surface*> missedActiveSurfaces;
 
-  /// Measurement surfaces handled in both forward and
-  /// backward filtering
-  std::vector<const Surface*> passedAgainSurfaces;
-
   /// Count how many surfaces have been hit
   std::size_t surfaceCount = 0;
-};
-
-/// @brief A container to store material properties for each material surface
-///
-/// This struct holds the scattering angles, the inverse covariance of the
-/// material, and a validity flag indicating whether the material is valid for
-/// the scattering process.
-struct MaterialProperties {
- public:
-  /// @brief Constructor to initialize material properties.
-  ///
-  /// @param scatteringAngles_ The vector of scattering angles.
-  /// @param invCovarianceMaterial_ The inverse covariance of the material.
-  /// @param materialIsValid_ A boolean flag indicating whether the material is valid.
-  MaterialProperties(const BoundVector& scatteringAngles_,
-                      const double deltaQOverPexpected,
-                       const double invCovarianceMaterial_,
-                       const double invCovarianceQOverP,
-                       const bool materialIsValid_)
-      : m_scatteringAngles(scatteringAngles_),
-        m_deltaQOverP(0.),
-        m_deltaQOverPexpected(deltaQOverPexpected),
-        m_invCovarianceMaterial(invCovarianceMaterial_),
-        m_invCovarianceQOverP(invCovarianceQOverP),
-        m_materialIsValid(materialIsValid_) {}
-
-  /// @brief Accessor for the scattering angles (const version)
-  /// @return Const reference to the vector of scattering angles
-  const BoundVector& scatteringAngles() const { return m_scatteringAngles; }
-
-  /// @brief Accessor for the scattering angles (mutable version)
-  /// @return Mutable reference to the vector of scattering angles for modification
-  BoundVector& scatteringAngles() { return m_scatteringAngles; }
-
-  /// @brief Accessor for the inverse covariance of the material
-  /// @return Inverse covariance value computed from material properties (e.g., Highland formula)
-  double invCovarianceMaterial() const { return m_invCovarianceMaterial; }
-
-  /// @brief Accessor for the deltaQOverP measurement parameter
-  /// @return Mutable reference to the deltaQOverP measureed parameter for modification
-  const double& deltaQOverPexpected() const { return m_deltaQOverPexpected; }
-
-  /// @brief Accessor to the expected deltaQOverP measurement parameter (mutable version)
-  /// @return The deltaQOverP expected parameter for modification
-  double& deltaQOverPexpected() { return m_deltaQOverPexpected; }
-  
-  /// @brief Accessor for the deltaQOverP free parameter
-  /// @return The deltaQOverP value parameter to fit
-  const double deltaQOverP() const { return m_deltaQOverP; }
-
-  /// @brief Accessor for the deltaQOverP free parameter (mutable version)
-  /// @return Mutable reference to the deltaQOverP value parameter for modification
-  double& deltaQOverP() { return m_deltaQOverP; }
-
-  /// @brief Accessor for the inverse covariance of q/p
-  /// @return Inverse covariance of the q/p value
-  double invCovarianceQOverP() const { return m_invCovarianceQOverP; }
-
-  /// @brief Accessor for the material validity flag
-  /// @return True if material is valid for scattering calculations, false for vacuum or zero thickness
-  bool materialIsValid() const { return m_materialIsValid; }
-
- private:
-  /// Vector of scattering angles. The vector is usually all zeros except for
-  /// eBoundPhi and eBoundTheta.
-  BoundVector m_scatteringAngles;
-
-  /// The q/p offset fitted parameter. Initial value is set to 0
-  double m_deltaQOverP = 0.0;
-  
-  /// The expected q/p offset parameter. Initial value is set to 0
-  double m_deltaQOverPexpected = 0.0;
-
-  /// Inverse covariance of the material. Compute with e.g. the Highland
-  /// formula.
-  double m_invCovarianceMaterial;
-
-  /// Inverse covariance of the q/p value
-  double m_invCovarianceQOverP;
-
-  /// Flag indicating whether the material is valid. Commonly vacuum and zero
-  /// thickness material will be ignored.
-  bool m_materialIsValid;
 };
 
 /// @brief A container to manage all properties of a gx2f system
@@ -339,14 +356,10 @@ struct MaterialProperties {
 /// This struct manages the mathematical infrastructure for the gx2f. It
 /// initializes and maintains the extended aMatrix and extended bVector.
 struct Gx2fSystem {
- public:
   /// @brief Constructor to initialize matrices and vectors to zero based on specified dimensions.
   ///
   /// @param nDims Number of dimensions for the extended matrix and vector.
-  explicit Gx2fSystem(std::size_t nDims)
-      : m_nDims{nDims},
-        m_aMatrix{Eigen::MatrixXd::Zero(nDims, nDims)},
-        m_bVector{Eigen::VectorXd::Zero(nDims)} {}
+  explicit Gx2fSystem(std::size_t nDims) : m_nDims{nDims} {}
 
   /// @brief Accessor for the number of dimensions of the extended system
   /// @return Number of dimensions for the aMatrix and bVector (bound parameters + scattering angles)
@@ -418,10 +431,10 @@ struct Gx2fSystem {
   double m_chi2 = 0.;
 
   /// Extended matrix for accumulation.
-  Eigen::MatrixXd m_aMatrix;
+  Eigen::MatrixXd m_aMatrix{Eigen::MatrixXd::Zero(m_nDims, m_nDims)};
 
   /// Extended vector for accumulation.
-  Eigen::VectorXd m_bVector;
+  Eigen::VectorXd m_bVector{Eigen::VectorXd::Zero(m_nDims)};
 
   /// Number of degrees of freedom of the system
   std::size_t m_ndf = 0u;
@@ -448,8 +461,7 @@ void addMeasurementToGx2fSumsBackend(
     const std::vector<BoundMatrix>& jacobianFromStart,
     const Eigen::MatrixXd& covarianceMeasurement, const BoundVector& predicted,
     const Eigen::VectorXd& measurement, const Eigen::MatrixXd& projector,
-    const bool energyLoss,
-    const Logger& logger);
+    const bool energyLoss, const Logger& logger);
 
 /// @brief Process measurements and fill the aMatrix and bVector
 ///
@@ -500,22 +512,19 @@ void addMeasurementToGx2fSums(Gx2fSystem& extendedSystem,
 /// @param logger A logger instance
 template <typename track_state_t>
 void addMaterialToGx2fSums(
-    Gx2fSystem& extendedSystem, const std::size_t nMaterialsHandled,
+    Gx2fSystem& extendedSystem,
     const std::unordered_map<GeometryIdentifier, MaterialProperties>&
-        materialMap,
-        bool energyLoss,
-    const track_state_t& trackState, const Logger& logger) {
+        materialMap, const track_state_t& trackState, const Logger& logger) {
   // Get and store geoId for the current material surface
   const GeometryIdentifier geoId = trackState.referenceSurface().geometryId();
   const auto materialMapId = materialMap.find(geoId);
   if (materialMapId == materialMap.end()) {
     ACTS_ERROR("No material properties found for surface " << geoId);
-    throw std::runtime_error(
-        "No material properties found for surface.");
+    throw std::runtime_error("No material properties found for surface.");
   }
 
   // The position, where we need to insert the values in aMatrix and bVector
-  const std::size_t deltaPosition = energyLoss? eBoundSize + 3 * nMaterialsHandled : eBoundSize + 2 * nMaterialsHandled;
+  const std::size_t deltaPosition = materialMapId->second.index();
 
   const BoundVector& scatteringAngles =
       materialMapId->second.scatteringAngles();
@@ -537,23 +546,25 @@ void addMaterialToGx2fSums(
       invCovTheta * scatteringAngles[eBoundTheta];
   extendedSystem.chi2() += invCovTheta * scatteringAngles[eBoundTheta] *
                            scatteringAngles[eBoundTheta];
-    
-    //q over p contribution
-   double residdeltaQOverP{0.};
-   double invCovQOverP{0.};
-    if(energyLoss){                  
-      ACTS_VERBOSE("Fitting energy loss");
-      invCovQOverP = materialMapId->second.invCovarianceQOverP();
-      residdeltaQOverP = materialMapId->second.deltaQOverP() - materialMapId->second.deltaQOverPexpected();
-      ACTS_VERBOSE("    deltaQOverP: " << materialMapId->second.deltaQOverP());
-      ACTS_VERBOSE("    deltaQOverPexpected: " << materialMapId->second.deltaQOverPexpected());
-      ACTS_VERBOSE("    invCovQOverP: " << invCovQOverP);
-      ACTS_VERBOSE("    residdeltaQOverP: " << residdeltaQOverP);
-      extendedSystem.aMatrix()(deltaPosition + 2, deltaPosition + 2) += invCovQOverP;
-      extendedSystem.bVector()(deltaPosition + 2, 0) -=
-          invCovQOverP * residdeltaQOverP;
-      extendedSystem.chi2() += invCovQOverP * residdeltaQOverP * residdeltaQOverP;
-    }
+
+  // q over p contribution
+  double residdeltaQOverP{0.};
+  double invCovQOverP{0.};
+  /// if(energyLoss){
+  ///   ACTS_VERBOSE("Fitting energy loss");
+  ///   invCovQOverP = materialMapId->second.invCovarianceQOverP();
+  ///   residdeltaQOverP = materialMapId->second.deltaQOverP() -
+  ///   materialMapId->second.deltaQOverPexpected(); ACTS_VERBOSE(" deltaQOverP:
+  ///   " << materialMapId->second.deltaQOverP()); ACTS_VERBOSE("
+  ///   deltaQOverPexpected: " << materialMapId->second.deltaQOverPexpected());
+  ///   ACTS_VERBOSE("    invCovQOverP: " << invCovQOverP);
+  ///   ACTS_VERBOSE("    residdeltaQOverP: " << residdeltaQOverP);
+  ///   extendedSystem.aMatrix()(deltaPosition + 2, deltaPosition + 2) +=
+  ///   invCovQOverP; extendedSystem.bVector()(deltaPosition + 2, 0) -=
+  ///       invCovQOverP * residdeltaQOverP;
+  ///   extendedSystem.chi2() += invCovQOverP * residdeltaQOverP *
+  ///   residdeltaQOverP;
+  /// }
   ACTS_VERBOSE(
       "Contributions in addMaterialToGx2fSums:\n"
       << "    invCov:        " << invCovPhi << "\n"
@@ -575,15 +586,15 @@ void addMaterialToGx2fSums(
       << invCovTheta * scatteringAngles[eBoundTheta] << "\n"
       << "        chi2sum contribution: "
       << invCovTheta * scatteringAngles[eBoundTheta] *
-             scatteringAngles[eBoundTheta]<<"\n"
-      <<" Energy loss:\n"
+             scatteringAngles[eBoundTheta]
+      << "\n"
+      << " Energy loss:\n"
       << "        energy loss residual: " << residdeltaQOverP << "\n"
       << "        aMatrix contribution: " << invCovQOverP << "\n"
-      << "        bVector contribution: "
-      << invCovQOverP * residdeltaQOverP << "\n"
+      << "        bVector contribution: " << invCovQOverP * residdeltaQOverP
+      << "\n"
       << "        chi2sum contribution: "
-      << invCovQOverP * residdeltaQOverP * residdeltaQOverP
-      << "\n");
+      << invCovQOverP * residdeltaQOverP * residdeltaQOverP << "\n");
 
   return;
 }
@@ -627,16 +638,13 @@ double computeDeltaQOverPFromEnergyLoss(
 /// @param multipleScattering Flag to consider multiple scattering in the calculation
 /// @param materialMap Map of geometry identifiers to scattering properties,
 ///        containing scattering angles and validation status
-/// @param geoIdVector A vector to store geometry identifiers for tracking processed elements
 /// @param logger A logger instance
 template <TrackProxyConcept track_proxy_t>
-void fillGx2fSystem(
-    const track_proxy_t track, Gx2fSystem& extendedSystem,
-    const bool multipleScattering,
-    const bool energyLoss,
-    const std::unordered_map<GeometryIdentifier, MaterialProperties>&
-        materialMap,
-    std::vector<GeometryIdentifier>& geoIdVector, const Logger& logger) {
+void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
+                    const bool multipleScattering, 
+                    const std::unordered_map<GeometryIdentifier,
+                                             MaterialProperties>& materialMap,
+                    const Logger& logger) {
   std::vector<BoundMatrix> jacobianFromStart;
   jacobianFromStart.emplace_back(BoundMatrix::Identity());
 
@@ -699,10 +707,9 @@ void fillGx2fSystem(
       jacobianFromStart.emplace_back(BoundMatrix::Identity());
 
       // Add the material contribution to the system
-      addMaterialToGx2fSums(extendedSystem, geoIdVector.size(), materialMap, energyLoss,
-                            trackState, logger);
+      addMaterialToGx2fSums(extendedSystem, materialMap,
+                             trackState, logger);
 
-      geoIdVector.emplace_back(geoId);
     }
   }
 }
@@ -775,7 +782,8 @@ void updateGx2fParams(
     BoundTrackParameters& params, const Eigen::VectorXd& deltaParamsExtended,
     const std::size_t nMaterialSurfaces,
     std::unordered_map<GeometryIdentifier, MaterialProperties>& materialMap,
-    const std::vector<GeometryIdentifier>& geoIdVector, const bool energyLoss=false);
+    const std::vector<GeometryIdentifier>& geoIdVector,
+    const bool energyLoss = false);
 
 /// @brief Calculate and update the covariance of the fitted parameters
 ///
@@ -818,10 +826,7 @@ class Gx2Fitter {
   explicit Gx2Fitter(const propagator_t& pPropagator,
                      std::unique_ptr<const Logger> _logger =
                          getDefaultLogger("Gx2Fitter", Logging::INFO))
-      : m_propagator(pPropagator),
-        m_logger{std::move(_logger)},
-        m_actorLogger{m_logger->cloneWithSuffix("Actor")},
-        m_addToSumLogger{m_logger->cloneWithSuffix("AddToSum")} {}
+      : m_propagator(pPropagator), m_logger{std::move(_logger)} {}
 
  private:
   /// The propagator for the transport and material update
@@ -829,8 +834,10 @@ class Gx2Fitter {
 
   /// The logger instance
   std::unique_ptr<const Logger> m_logger;
-  std::unique_ptr<const Logger> m_actorLogger;
-  std::unique_ptr<const Logger> m_addToSumLogger;
+  std::unique_ptr<const Logger> m_actorLogger{
+      m_logger->cloneWithSuffix("Actor")};
+  std::unique_ptr<const Logger> m_addToSumLogger{
+      m_logger->cloneWithSuffix("AddToSum")};
 
   const Logger& logger() const { return *m_logger; }
 
@@ -854,10 +861,10 @@ class Gx2Fitter {
     const std::unordered_map<const Surface*, SourceLink>* inputMeasurements{};
 
     /// Whether to consider multiple scattering.
-    bool multipleScattering = false;
+    bool doMultipleScattering = false;
 
     /// Whether to consider energy loss.
-    bool energyLoss = false;  /// TODO implement later
+    bool doEnergyLoss = false;  /// TODO implement later
 
     /// Whether to include non-linear correction during global to local
     /// transformation
@@ -885,8 +892,8 @@ class Gx2Fitter {
 
     /// The materialMap stores for each visited surface their scattering
     /// properties
-    std::unordered_map<GeometryIdentifier, MaterialProperties>*
-        materialMap = nullptr;
+    std::unordered_map<GeometryIdentifier, MaterialProperties>* materialMap =
+        nullptr;
 
     /// @brief Gx2f actor operation
     ///
@@ -933,23 +940,24 @@ class Gx2Fitter {
 
       ++result.surfaceCount;
       const GeometryIdentifier geoId = surface->geometryId();
-      ACTS_DEBUG("Surface " << geoId << " detected.");
+      ACTS_DEBUG("Surface "
+                 << surface->toStream(state.geoContext) << " detected. "
+                 << " Is sensitive: " << (surface->isSensitive() ? "yes" : "no")
+                 << ", has material: "
+                 << (surface->hasMaterial() ? "yes" : "no"));
 
-      const bool surfaceIsSensitive = surface->isSensitive();
-      const bool surfaceHasMaterial = surface->hasMaterial();
       // First we figure out, if we would need to look into material surfaces at
       // all. Later, we also check, if the material slab is valid, otherwise we
       // modify this flag to ignore the material completely.
-      bool doMaterial = multipleScattering && surfaceHasMaterial;
 
-      // Found material - add a scatteringAngles entry if not done yet and energy loss if enabled.
-      // Handling will happen later
-      if (doMaterial) {
+      // Found material - add a scatteringAngles entry if not done yet and
+      // energy loss if enabled. Handling will happen later
+      if (surface->hasMaterial() && (doMultipleScattering || doEnergyLoss)) {
         ACTS_DEBUG("    The surface contains material, ...");
-
+        assert(materialMap != nullptr);
         auto materialMapId = materialMap->find(geoId);
         if (materialMapId == materialMap->end()) {
-          ACTS_DEBUG("    ... create entry in scattering map.");
+          ACTS_DEBUG("    ... create entry in material map.");
 
           const Result<MaterialSlab> slabResult =
               Acts::detail::evaluateMaterialSlab(
@@ -963,12 +971,10 @@ class Gx2Fitter {
             return Result<void>::failure(slabResult.error());
           }
           const MaterialSlab& slab = *slabResult;
-          const bool slabIsValid = !slab.isVacuum();
 
-          double invSigma2 = 0.;
-          double invSigma2QOverP = 0.;
-          double deltaQOverP = 0;
-          if (slabIsValid) {
+          MaterialProperties::ELossAtSurface eLoss{};
+          MaterialProperties::ScatteringAtSurface scatterer{};
+          if (!slab.isVacuum()) {
             const auto& particle =
                 parametersWithHypothesis->particleHypothesis();
 
@@ -980,42 +986,49 @@ class Gx2Fitter {
                     particle.absoluteCharge()));
             ACTS_VERBOSE(
                 "        The Highland formula gives sigma = " << sigma);
-            invSigma2 = 1. / std::pow(sigma, 2);
-            
-            if(energyLoss){
-            const double sigmaQOverP =
-                static_cast<double>(Acts::computeEnergyLossLandauSigmaQOverP(
-                    slab, particle.mass(),
-                    static_cast<float>(
-                        parametersWithHypothesis->parameters()[eBoundQOverP]),
-                    particle.absoluteCharge()));
-            invSigma2QOverP = 1. / std::pow(sigmaQOverP, 2);
 
-            double eLoss = computeEnergyLossMean(
-                slab, particle.absolutePdg(), particle.mass(),
-                parametersWithHypothesis->parameters()[eBoundQOverP], particle.absoluteCharge());
-            
-            deltaQOverP = computeDeltaQOverPFromEnergyLoss(slab, eLoss, particle, parametersWithHypothesis->parameters()[eBoundQOverP],state.options.direction);
-            ACTS_VERBOSE(
-                "  Energy loss fit enabled:"
-                      <<"The Landau formula gives sigmaQOverP = " << sigmaQOverP
-                 << " and deltaQOverP = " << deltaQOverP);
-          }
+            scatterer = MaterialProperties::ScatteringAtSurface{sigma};
 
           } else {
             ACTS_VERBOSE("        Material slab is not valid.");
           }
 
-          materialMap->emplace(
-              geoId, MaterialProperties{BoundVector::Zero(), deltaQOverP, invSigma2, invSigma2QOverP, 
-                                          slabIsValid});
-          materialMapId = materialMap->find(geoId);
+          if (doEnergyLoss) {
+            if (extensions.elossAccumulator.isConnected()) {
+              eLoss = extensions.elossAccumulator(
+                  *calibrationContext, stepper.position(state.stepping),
+                  stepper.direction(state.stepping), *surface
+
+              );
+            }
+            if (!eLoss.isValid) {
+              const auto& particle =
+                  parametersWithHypothesis->particleHypothesis();
+
+              eLoss = MaterialProperties::ELossAtSurface{
+                  computeEnergyLossMean(
+                      slab, particle.absolutePdg(), particle.mass(),
+                      parametersWithHypothesis->parameters()[eBoundQOverP],
+                      particle.absoluteCharge()),
+                  /// Energy loss uncertainty
+                  static_cast<double>(Acts::computeEnergyLossLandauSigma(
+                      slab, particle.mass(),
+                      static_cast<float>(
+                          parametersWithHypothesis->parameters()[eBoundQOverP]),
+                      particle.absoluteCharge()))};
+            }
+          }
+          materialMapId =
+              materialMap
+                  ->emplace(geoId, MaterialProperties{result.materialParamIdx,
+                                                      std::move(scatterer),
+                                                      std::move(eLoss)})
+                  .first;
+          result.materialParamIdx += materialMapId->second.nDim();
 
         } else {
           ACTS_DEBUG("    ... found entry in scattering map.");
         }
-
-        doMaterial = doMaterial && materialMapId->second.materialIsValid();
       }
 
       // Here we handle all measurements
@@ -1065,16 +1078,17 @@ class Gx2Fitter {
             ACTS_VERBOSE("        boundParams after the update: "
                          << boundParams.parameters().transpose());
 
-              //update paramaters for energty loss if energy loss is also enabled
-              if(energyLoss){
-                ACTS_VERBOSE("   Update parameters with energy loss.");
-                ACTS_VERBOSE("  Energy Loss deltaQoverP: "<< materialMapId->second.deltaQOverP());
-                      ACTS_VERBOSE("        boundParams before the update: "
-                         << boundParams.parameters().transpose());
-                boundParams.parameters()[eBoundQOverP] +=
-                materialMapId->second.deltaQOverP();
-                ACTS_VERBOSE("        boundParams after the update: "
-                         << boundParams.parameters().transpose());
+            // update parameters for energty loss if energy loss is also enabled
+            if (doEnergyLoss) {
+              ACTS_VERBOSE("   Update parameters with energy loss.");
+              ACTS_VERBOSE("  Energy Loss deltaQoverP: "
+                           << materialMapId->second.deltaQOverP());
+              ACTS_VERBOSE("        boundParams before the update: "
+                           << boundParams.parameters().transpose());
+              boundParams.parameters()[eBoundQOverP] +=
+                  materialMapId->second.deltaQOverP();
+              ACTS_VERBOSE("        boundParams after the update: "
+                           << boundParams.parameters().transpose());
             }
           }
 
@@ -1170,27 +1184,25 @@ class Gx2Fitter {
           // multipleScattering and have material
           ACTS_DEBUG("    Update parameters with scattering angles.");
           const auto materialMapId = materialMap->find(geoId);
-          ACTS_VERBOSE(
-              "        scatteringAngles: "
-              << materialMapId->second.scatteringAngles().transpose());
+          ACTS_VERBOSE("        scatteringAngles: "
+                       << materialMapId->second.scatteringAngles().transpose());
           ACTS_VERBOSE("        boundParams before the update: "
                        << boundParams.parameters().transpose());
-          boundParams.parameters() +=
-              materialMapId->second.scatteringAngles();
+          boundParams.parameters() += materialMapId->second.scatteringAngles();
           ACTS_VERBOSE("        boundParams after the update: "
                        << boundParams.parameters().transpose());
-          if(energyLoss){
-            
-             ACTS_VERBOSE("   Update parameters with energy loss.");
-              ACTS_VERBOSE("  Energy Loss deltaQoverP: "<< materialMapId->second.deltaQOverP());
-            
-                ACTS_VERBOSE("  boundParams before the update: "
+          if (doEnergyLoss) {
+            ACTS_VERBOSE("   Update parameters with energy loss.");
+            ACTS_VERBOSE("  Energy Loss deltaQoverP: "
+                         << materialMapId->second.deltaQOverP());
+
+            ACTS_VERBOSE("  boundParams before the update: "
                          << boundParams.parameters().transpose());
-                boundParams.parameters()[eBoundQOverP] +=
+            boundParams.parameters()[eBoundQOverP] +=
                 materialMapId->second.deltaQOverP();
-                ACTS_VERBOSE("        boundParams after the update: "
+            ACTS_VERBOSE("        boundParams after the update: "
                          << boundParams.parameters().transpose());
-            }
+          }
 
           // Fill the track state
           trackStateProxy.smoothed() = boundParams.parameters();
@@ -1234,7 +1246,7 @@ class Gx2Fitter {
         // Here we handle holes. If material hasn't been handled before
         // (because multipleScattering is turned off), we will also handle it
         // here
-        if (multipleScattering) {
+        if (doMultipleScattering) {
           ACTS_DEBUG(
               "    The surface contains no measurement, but maybe a hole.");
         } else {
@@ -1315,10 +1327,7 @@ class Gx2Fitter {
     bool checkAbort(propagator_state_t& /*state*/, const stepper_t& /*stepper*/,
                     const navigator_t& /*navigator*/, const result_t& result,
                     const Logger& /*logger*/) const {
-      if (result.finished) {
-        return true;
-      }
-      return false;
+      return result.finished;
     }
   };
 
@@ -1359,12 +1368,6 @@ class Gx2Fitter {
       inputMeasurements.try_emplace(gx2fOptions.extensions.surfaceAccessor(*it),
                                     *it);
     }
-
-    // Store, if we want to do multiple scattering. We still need to pass this
-    // option to the Actor.
-    const bool multipleScattering = gx2fOptions.multipleScattering;
-    const bool energyLoss = gx2fOptions.energyLoss;
-    
 
     // Create the ActorList
     using GX2FActor = Actor;
@@ -1423,7 +1426,8 @@ class Gx2Fitter {
 
       auto& gx2fActor = propagatorOptions.actorList.template get<GX2FActor>();
       gx2fActor.inputMeasurements = &inputMeasurements;
-      gx2fActor.multipleScattering = false;
+      gx2fActor.doMultipleScattering = gx2fOptions.doMultipleScattering;
+      gx2fActor.doEnergyLoss = gx2fOptions.doEnergyLoss;
       gx2fActor.extensions = gx2fOptions.extensions;
       gx2fActor.calibrationContext = &gx2fOptions.calibrationContext.get();
       gx2fActor.actorLogger = m_actorLogger.get();
@@ -1479,17 +1483,15 @@ class Gx2Fitter {
       track.tipIndex() = tipIndex;
       track.linkForward();
 
-      // Count the material surfaces, to set up the system. In the multiple
-      // scattering case, we need to extend our system.
-      const std::size_t nMaterialSurfaces = 0u;
-
       // We need 6 dimensions for the bound parameters and 3 * nMaterialSurfaces
       // dimensions for the scattering angles and the enrgy loss
-      const std::size_t dimsExtendedParams = energyLoss ? eBoundSize + 3 * nMaterialSurfaces : eBoundSize + 2 * nMaterialSurfaces;
+      const std::size_t dimsExtendedParams =
+          energyLoss ? eBoundSize + 3 * nMaterialSurfaces
+                     : eBoundSize + 2 * nMaterialSurfaces;
 
       // System that we fill with the information gathered by the actor and
       // evaluate later
-      Gx2fSystem extendedSystem{dimsExtendedParams};
+      Gx2fSystem extendedSystem{gx2fResult.materialParamIdx};
 
       // This vector stores the IDs for each visited material in order. We use
       // it later for updating the scattering angles. We cannot use
@@ -1497,8 +1499,8 @@ class Gx2Fitter {
       // all stored material in each propagation.
       std::vector<GeometryIdentifier> geoIdVector;
 
-      fillGx2fSystem(track, extendedSystem, false, energyLoss, materialMap,  geoIdVector,
-                     *m_addToSumLogger);
+      fillGx2fSystem(track, extendedSystem, false, energyLoss, materialMap,
+                     geoIdVector, *m_addToSumLogger);
 
       chi2sum = extendedSystem.chi2();
 
@@ -1589,8 +1591,8 @@ class Gx2Fitter {
 
       auto& gx2fActor = propagatorOptions.actorList.template get<GX2FActor>();
       gx2fActor.inputMeasurements = &inputMeasurements;
-      gx2fActor.multipleScattering = true;
-      gx2fActor.energyLoss = true;
+      gx2fActor.doMultipleScattering = gx2fOptions.doMultipleScattering;
+      gx2fActor.doEnergyLoss = gx2fOptions.doEnergyLoss;
       gx2fActor.extensions = gx2fOptions.extensions;
       gx2fActor.calibrationContext = &gx2fOptions.calibrationContext.get();
       gx2fActor.actorLogger = m_actorLogger.get();
@@ -1652,11 +1654,13 @@ class Gx2Fitter {
 
       // We need 6 dimensions for the bound parameters and 3 * nMaterialSurfaces
       // dimensions for the scattering angles and energy loss.
-      const std::size_t dimsExtendedParams = energyLoss ? eBoundSize + 3 * nMaterialSurfaces : eBoundSize + 2 * nMaterialSurfaces;
+      const std::size_t dimsExtendedParams =
+          energyLoss ? eBoundSize + 3 * nMaterialSurfaces
+                     : eBoundSize + 2 * nMaterialSurfaces;
 
       // System that we fill with the information gathered by the actor and
       // evaluate later
-      Gx2fSystem extendedSystem{dimsExtendedParams};
+      Gx2fSystem extendedSystem{gx2fResult.materialParamIdx};
 
       // This vector stores the IDs for each visited material in order. We use
       // it later for updating the scattering angles. We cannot use
@@ -1664,8 +1668,8 @@ class Gx2Fitter {
       // all stored material in each propagation.
       std::vector<GeometryIdentifier> geoIdVector;
 
-      fillGx2fSystem(track, extendedSystem, true, energyLoss, materialMap, geoIdVector,
-                     *m_addToSumLogger);
+      fillGx2fSystem(track, extendedSystem, true, energyLoss, materialMap,
+                     geoIdVector, *m_addToSumLogger);
 
       chi2sum = extendedSystem.chi2();
 
@@ -1736,8 +1740,8 @@ class Gx2Fitter {
       PropagatorOptions propagatorOptions{gx2fOptions.propagatorPlainOptions};
       auto& gx2fActor = propagatorOptions.actorList.template get<GX2FActor>();
       gx2fActor.inputMeasurements = &inputMeasurements;
-      gx2fActor.multipleScattering = multipleScattering;
-      gx2fActor.energyLoss = energyLoss;
+      gx2fActor.doMultipleScattering = gx2fOptions.doMultipleScattering;
+      gx2fActor.doEnergyLoss = gx2fOptions.doEnergyLoss;
       gx2fActor.extensions = gx2fOptions.extensions;
       gx2fActor.calibrationContext = &gx2fOptions.calibrationContext.get();
       gx2fActor.actorLogger = m_actorLogger.get();
