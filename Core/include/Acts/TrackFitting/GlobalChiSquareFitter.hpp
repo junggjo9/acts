@@ -529,44 +529,6 @@ void addMeasurementToGx2fSums(Gx2fSystem& extendedSystem,
                                   projector, false, logger);
 }
 
-/// @brief Process material and fill the aMatrix and bVector
-///
-/// The function processes each material for the GX2F Actor fitting process.
-/// It extracts the information from the track state and adds it to aMatrix,
-/// bVector, and chi2sum.
-///
-/// @tparam track_state_t The type of the track state
-///
-/// @param extendedSystem All parameters of the current equation system
-/// @param nMaterialsHandled How many materials we already handled. Used for the offset.
-/// @param materialMap The scattering map, containing all scattering angles and covariances
-/// @param trackState The track state to analyse
-/// @param logger A logger instance
-template <typename track_state_t>
-void addMaterialToGx2fSums(
-    Gx2fSystem& extendedSystem,
-    const std::unordered_map<GeometryIdentifier, MaterialProperties>&
-        materialMap,
-    const track_state_t& trackState, std::size_t& deltaPosition,
-    std::vector<GeometryIdentifier>& geoIdVector, const Logger& logger) {
-  // Get and store geoId for the current material surface
-  const GeometryIdentifier geoId = trackState.referenceSurface().geometryId();
-  const auto materialMapId = materialMap.find(geoId);
-  if (materialMapId == materialMap.end()) {
-    ACTS_ERROR("No material properties found for surface " << geoId);
-    throw std::runtime_error("No material properties found for surface.");
-  }
-  /// Invalid material state
-  if (materialMapId->second.nDim() == 0ul) {
-    return;
-  }
-  geoIdVector.push_back(geoId);
-  materialMapId->second.contributionToGx2fSums(
-      extendedSystem, trackState.smoothed()[eBoundTheta], deltaPosition,
-      logger);
-  deltaPosition += materialMapId->second.nDim();
-}
-
 /// @brief Convert an energy loss into the corresponding change in q/p
 ///
 /// Applies an energy loss to the particle's energy and returns the resulting
@@ -658,11 +620,23 @@ void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
     // Handle material
     if (typeFlags.hasMaterial()) {
       ACTS_DEBUG("    Handle material");
+      const auto materialMapId = materialMap.find(geoId);
+      if (materialMapId == materialMap.end()) {
+        ACTS_ERROR("No material properties found for surface " << geoId);
+        throw std::runtime_error("No material properties found for surface.");
+      }
+      /// Invalid material state
+      if (materialMapId->second.nDim() == 0ul) {
+        continue;
+      }
+      geoIdVector.push_back(geoId);
+      materialMapId->second.contributionToGx2fSums(
+          extendedSystem, trackState.smoothed()[eBoundTheta], deltaPosition,
+          logger);
+      deltaPosition += materialMapId->second.nDim();
+
       // Add for this material a new Jacobian, starting from this surface.
       jacobianFromStart.emplace_back(BoundMatrix::Identity());
-      // Add the material contribution to the system
-      addMaterialToGx2fSums(extendedSystem, materialMap, trackState,
-                            deltaPosition, geoIdVector, logger);
     }
   }
 }

@@ -32,8 +32,8 @@ void MaterialProperties::updateTrackParameters(
   }
   if (m_eloss.isValid()) {
     const ParticleHypothesis& hypot = trackPars.particleHypothesis();
-    trackPars.parameters()[eBoundQoverP] = hypot.qOverP(
-        trackPars.absoluteMomentum() - m_lostEnergy, trackpars.charge());
+    trackPars.parameters()[eBoundQOverP] = hypot.qOverP(
+        trackPars.absoluteMomentum() - m_lostEnergy, trackPars.charge());
   }
 }
 
