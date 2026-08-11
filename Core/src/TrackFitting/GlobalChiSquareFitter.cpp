@@ -19,15 +19,21 @@ void MaterialProperties::updateParameters(
     m_scatPhi += deltaParamsExtended[stateIdx + 1ul];
   }
   if (m_eloss.isValid()) {
+    const std::size_t eLossIdx = stateIdx + (nDim() - 1ul);
+    m_lostEnergy += deltaParamsExtended[eLossIdx];
   }
 }
 
-void MaterialProperties::updateTrackParameters(BoundVector& trackPars) const {
+void MaterialProperties::updateTrackParameters(
+    BoundTrackParameters& trackPars) const {
   if (m_scatterer.isValid()) {
-    trackPars[eBoundPhi] += deltaPhi();
-    trackPars[eBoundTheta] += deltaTheta();
+    trackPars.parameters()[eBoundPhi] += deltaPhi();
+    trackPars.parameters()[eBoundTheta] += deltaTheta();
   }
   if (m_eloss.isValid()) {
+    const ParticleHypothesis& hypot = trackPars.particleHypothesis();
+    trackPars.parameters()[eBoundQoverP] = hypot.qOverP(
+        trackPars.absoluteMomentum() - m_lostEnergy, trackpars.charge());
   }
 }
 

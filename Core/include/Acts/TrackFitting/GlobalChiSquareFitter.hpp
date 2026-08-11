@@ -180,7 +180,7 @@ struct MaterialProperties {
   //  subtract the energy loss from the q/p parameters
   /// @param trackPars The bound track parameters fetched from the stepper which
   /// will be fed back to the stepper to adjust the trajectory position
-  void updateTrackParameters(BoundVector& trackPars) const;
+  void updateTrackParameters(BoundTrackParameters& trackPars) const;
 
   void contributionToGx2fSums(Gx2fSystem& extendedSystem, const double theta,
                               const std::size_t firstParamIdx,
@@ -937,24 +937,19 @@ class Gx2Fitter {
       auto& [boundParams, jacobian, pathLength] = *res;
 
       trackStateProxy.smoothedCovariance() = state.stepping.cov;
-
-      // Fill the track state
-      trackStateProxy.smoothed() = boundParams.parameters();
-
       trackStateProxy.jacobian() = jacobian;
       trackStateProxy.pathLength() = pathLength;
 
       /// There is no material update
       if (hasMaterial) {
-        trackStateProxy.setHasMaterial();
+        typeFlags.setHasMaterial();
 
         // track
         ACTS_DEBUG("    Update parameters with material effects.");
         ACTS_VERBOSE("        boundParams before the update: "
                      << trackStateProxy.smoothed().transpose());
 
-        materialMap->at(geoId).updateTrackParameters(
-            trackStateProxy.smoothed());
+        materialMap->at(geoId).updateTrackParameters(boundParams);
         ACTS_VERBOSE("        boundParams before the update: "
                      << trackStateProxy.smoothed().transpose());
 
@@ -965,6 +960,9 @@ class Gx2Fitter {
                        trackStateProxy.smoothed(),
                        trackStateProxy.smoothedCovariance(), *surface);
       }
+
+      // Fill the track state
+      trackStateProxy.smoothed() = boundParams.parameters();
       if (!isSensitive) {
         return Result<void>::success();
       }
@@ -1052,7 +1050,7 @@ class Gx2Fitter {
       }
 
       if (doEnergyLoss) {
-        if (extensions.elossAccumulator.isConnected()) {
+        if (extensions.elossAccumulator.connected()) {
           eLoss = extensions.elossAccumulator(
               *calibrationContext, stepper.position(state.stepping),
               stepper.direction(state.stepping), *surface
@@ -1189,11 +1187,11 @@ class Gx2Fitter {
 
       auto& gx2fActor = propagatorOptions.actorList.template get<GX2FActor>();
       gx2fActor.inputMeasurements = &inputMeasurements;
-      gx2fActor.doMultipleScattering = gx2fOptions.doMultipleScattering;
-      gx2fActor.doEnergyLoss =
-          gx2fOptions.doEnergyLoss && gx2fOptions.includeMaterialInIter;
-      gx2fActor.extensions =
-          gx2fOptions.extensions && gx2fOptions.includeMaterialInIter;
+      if (gx2fOptions.includeMaterialInIter) {
+        gx2fActor.doMultipleScattering = gx2fOptions.doMultipleScattering;
+        gx2fActor.doEnergyLoss = gx2fOptions.doEnergyLoss;
+      }
+      gx2fActor.extensions = gx2fOptions.extensions;
       gx2fActor.calibrationContext = &gx2fOptions.calibrationContext.get();
       gx2fActor.actorLogger = m_actorLogger.get();
       gx2fActor.materialMap = &materialMap;
