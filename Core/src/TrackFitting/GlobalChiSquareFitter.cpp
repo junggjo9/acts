@@ -55,7 +55,7 @@ void MaterialProperties::contributionToGx2fSums(Gx2fSystem& extendedSystem,
     extendedSystem.aMatrix()(stateIdx + 1, stateIdx + 1) += invCovTheta;
     extendedSystem.bVector()(stateIdx + 1, 0) -= invCovTheta * deltaTheta();
     extendedSystem.chi2() += invCovTheta * Acts::square(deltaTheta());
-    ACTS_VERBOSE("Scattering contributions in contributionToGx2fSums:\n"
+    ACTS_INFO("Scattering contributions in contributionToGx2fSums:\n"
                  << "    invCov:        " << invCovPhi << "\n"
                  << "    sinThetaLoc:   " << sinThetaLoc << "\n"
                  << "    Phi:\n"

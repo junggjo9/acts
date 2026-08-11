@@ -872,10 +872,11 @@ class Gx2Fitter {
       const GeometryIdentifier geoId = surface->geometryId();
 
       auto sourceLinkIt = inputMeasurements->find(surface);
+      auto materialItr = materialMap->find(geoId);
       const bool isSensitive =
           surface->isSensitive() || sourceLinkIt != inputMeasurements->end();
       const bool hasMaterial =
-          surface->hasMaterial() && materialMap->at(geoId).materialIsValid();
+          surface->hasMaterial() && materialItr!= materialMap->end() && materialItr->second.materialIsValid();
       /// The surface is neither sensitive or it carries material
       if (!isSensitive && !hasMaterial) {
         return Result<void>::success();
@@ -923,7 +924,7 @@ class Gx2Fitter {
         ACTS_VERBOSE("        boundParams before the update: "
                      << trackStateProxy.smoothed().transpose());
 
-        materialMap->at(geoId).updateTrackParameters(boundParams);
+        materialItr->second.updateTrackParameters(boundParams);
         ACTS_VERBOSE("        boundParams before the update: "
                      << trackStateProxy.smoothed().transpose());
 
