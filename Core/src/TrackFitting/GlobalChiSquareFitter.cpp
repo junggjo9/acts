@@ -10,37 +10,92 @@
 
 #include "Acts/Definitions/TrackParametrization.hpp"
 
-void Acts::Experimental::updateGx2fParams(
+namespace Acts::Experimental {
+
+void MaterialProperties::updateParameters(
+    const Eigen::VectorXd& deltaParamsExtended, const std::size_t stateIdx) {
+  if (m_scatterer.isValid()) {
+    m_scatTheta += deltaParamsExtended[stateIdx];
+    m_scatPhi += deltaParamsExtended[stateIdx + 1ul];
+  }
+  if (m_eloss.isValid()) {
+  }
+}
+
+void MaterialProperties::updateTrackParameters(BoundVector& trackPars) const {
+  if (m_scatterer.isValid()) {
+    trackPars[eBoundPhi] += deltaPhi();
+    trackPars[eBoundTheta] += deltaTheta();
+  }
+  if (m_eloss.isValid()) {
+  }
+}
+
+void MaterialProperties::contributionToGx2fSums(Gx2fSystem& extendedSystem,
+                                                const double theta,
+                                                const std::size_t stateIdx,
+                                                const Logger& logger) const {
+  if (m_scatterer.isValid()) {
+    const double invCovTheta = Acts::square(m_scatterer.invSigma());
+    const double sinThetaLoc = std::sin(theta);
+    const double invCovPhi = invCovTheta * Acts::square(sinThetaLoc);
+
+    // Phi contribution
+    extendedSystem.aMatrix()(stateIdx, stateIdx) += invCovPhi;
+    extendedSystem.bVector()(stateIdx, 0) -= invCovPhi * deltaPhi();
+    extendedSystem.chi2() += invCovPhi * Acts::square(deltaPhi());
+
+    // Theta Contribution
+    extendedSystem.aMatrix()(stateIdx + 1, stateIdx + 1) += invCovTheta;
+    extendedSystem.bVector()(stateIdx + 1, 0) -= invCovTheta * deltaTheta();
+    extendedSystem.chi2() += invCovTheta * Acts::square(deltaTheta());
+    ACTS_VERBOSE("Scattering contributions in contributionToGx2fSums:\n"
+                 << "    invCov:        " << invCovPhi << "\n"
+                 << "    sinThetaLoc:   " << sinThetaLoc << "\n"
+                 << "    Phi:\n"
+                 << "        scattering angle:     " << deltaPhi() << "\n"
+                 << "        aMatrix contribution: " << invCovPhi << "\n"
+                 << "        bVector contribution: " << invCovPhi * deltaPhi()
+                 << "\n"
+                 << "        chi2sum contribution: "
+                 << invCovPhi * Acts::square(deltaPhi()) << "\n"
+                 << "    Theta:\n"
+                 << "        scattering angle:     " << deltaTheta() << "\n"
+                 << "        aMatrix contribution: " << invCovTheta << "\n"
+                 << "        bVector contribution: "
+                 << invCovTheta * deltaTheta() << "\n"
+                 << "        chi2sum contribution: "
+                 << invCovTheta * Acts::square(deltaTheta()));
+  }
+
+  if (m_eloss.isValid()) {
+    const std::size_t eLossIdx = stateIdx + (nDim() - 1ul);
+    extendedSystem.aMatrix()(eLossIdx, eLossIdx) = 1.;
+    ACTS_VERBOSE("Fitting energy loss");
+  }
+}
+
+void updateGx2fParams(
     BoundTrackParameters& params, const Eigen::VectorXd& deltaParamsExtended,
     std::unordered_map<GeometryIdentifier, MaterialProperties>& materialMap,
-    const std::vector<GeometryIdentifier>& geoIdVector, const bool energyLoss) {
+    const std::vector<GeometryIdentifier>& geoIdVector) {
   // update params
   params.parameters() +=
       deltaParamsExtended.topLeftCorner<eBoundSize, 1>().eval();
 
+  std::size_t deltaPosition{eBoundSize};
   // update the scattering angles.
-  for (std::size_t matSurface = 0; matSurface < nMaterialSurfaces;
-       matSurface++) {
-    const std::size_t deltaPosition =
-        energyLoss ? eBoundSize + 3 * matSurface : eBoundSize + 2 * matSurface;
-    const GeometryIdentifier geoId = geoIdVector[matSurface];
+  for (const GeometryIdentifier& geoId : geoIdVector) {
     const auto materialMapId = materialMap.find(geoId);
     assert(materialMapId != materialMap.end() &&
            "No material properties found for material surface.");
-    materialMapId->second.scatteringAngles().block<2, 1>(2, 0) +=
-        deltaParamsExtended.block<2, 1>(deltaPosition, 0).eval();
-    // energy loss update for delta(q/p)
-    if (energyLoss) {
-      materialMapId->second.deltaQOverP() +=
-          deltaParamsExtended.block<1, 1>(deltaPosition + 2, 0).value();
-    }
-  }
 
-  return;
+    materialMapId->second.updateParameters(deltaParamsExtended, deltaPosition);
+  }
 }
 
-void Acts::Experimental::updateGx2fCovarianceParams(
-    BoundMatrix& fullCovariancePredicted, Gx2fSystem& extendedSystem) {
+void updateGx2fCovarianceParams(BoundMatrix& fullCovariancePredicted,
+                                Gx2fSystem& extendedSystem) {
   // make invertible
   for (std::size_t i = 0; i < extendedSystem.nDims(); ++i) {
     if (extendedSystem.aMatrix()(i, i) == 0.) {
@@ -56,7 +111,7 @@ void Acts::Experimental::updateGx2fCovarianceParams(
   return;
 }
 
-void Acts::Experimental::addMeasurementToGx2fSumsBackend(
+void addMeasurementToGx2fSumsBackend(
     Gx2fSystem& extendedSystem,
     const std::vector<BoundMatrix>& jacobianFromStart,
     const Eigen::MatrixXd& covarianceMeasurement, const BoundVector& predicted,
@@ -153,17 +208,15 @@ void Acts::Experimental::addMeasurementToGx2fSumsBackend(
       << (*safeInvCovMeasurement));
 }
 
-Eigen::VectorXd Acts::Experimental::computeGx2fDeltaParams(
-    const Acts::Experimental::Gx2fSystem& extendedSystem) {
+Eigen::VectorXd computeGx2fDeltaParams(const Gx2fSystem& extendedSystem) {
   return extendedSystem.aMatrix().colPivHouseholderQr().solve(
       extendedSystem.bVector());
 }
 
-double Acts::Experimental::computeDeltaQOverPFromEnergyLoss(
+double computeDeltaQOverPFromEnergyLoss(
     const MaterialSlab& slab, const double eLoss,
     const ParticleHypothesis& particleHypothesis, const double qOverP,
     const Direction direction) {
-  const PdgParticle absPdg = particleHypothesis.absolutePdg();
   const double mass = particleHypothesis.mass();
   const double absQ = particleHypothesis.absoluteCharge();
 
@@ -191,3 +244,5 @@ double Acts::Experimental::computeDeltaQOverPFromEnergyLoss(
 
   return nextQOverP - qOverP;
 }
+
+}  // namespace Acts::Experimental
