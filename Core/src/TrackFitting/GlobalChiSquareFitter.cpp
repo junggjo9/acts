@@ -12,7 +12,6 @@
 
 void Acts::Experimental::updateGx2fParams(
     BoundTrackParameters& params, const Eigen::VectorXd& deltaParamsExtended,
-    const std::size_t nMaterialSurfaces,
     std::unordered_map<GeometryIdentifier, MaterialProperties>& materialMap,
     const std::vector<GeometryIdentifier>& geoIdVector, const bool energyLoss) {
   // update params

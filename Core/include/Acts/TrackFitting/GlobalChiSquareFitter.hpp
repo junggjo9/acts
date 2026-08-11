@@ -55,9 +55,8 @@ constexpr TrackStatePropMask trackStateMask = TrackStatePropMask::Smoothed |
 
 // A projector used for scattering. By using Jacobian * phiThetaProjector one
 // gets only the derivatives for the variables phi and theta.
-const Eigen::Matrix<double, eBoundSize, 2> phiThetaProjector = [] {
-  Eigen::Matrix<double, eBoundSize, 2> m =
-      Eigen::Matrix<double, eBoundSize, 2>::Zero();
+const Acts::Matrix<eBoundSize, 2> phiThetaProjector = [] {
+  Acts::Matrix<eBoundSize, 2> m = Acts::Matrix<eBoundSize, 2>::Zero();
   m(eBoundPhi, 0) = 1.0;
   m(eBoundTheta, 1) = 1.0;
   return m;
@@ -66,9 +65,8 @@ const Eigen::Matrix<double, eBoundSize, 2> phiThetaProjector = [] {
 // A projector used for scattering and energy loss. By using Jacobian *
 // phiThetaQOverPProjector one gets the derivatives for the variables phi,
 // theta, and q/p.
-const Eigen::Matrix<double, eBoundSize, 3> phiThetaQOverPProjector = [] {
-  Eigen::Matrix<double, eBoundSize, 3> m =
-      Eigen::Matrix<double, eBoundSize, 3>::Zero();
+const Acts::Matrix<eBoundSize, 3> phiThetaQOverPProjector = [] {
+  Acts::Matrix<eBoundSize, 3> m = Acts::Matrix<eBoundSize, 3>::Zero();
   m(eBoundPhi, 0) = 1.0;
   m(eBoundTheta, 1) = 1.0;
   m(eBoundQOverP, 2) = 1.0;
@@ -90,12 +88,17 @@ struct MaterialProperties {
   /// uncertainty are plugged into the chi2 system. Otherwise, the energy loss
   /// from the tracking geometry material is taken.
   struct ELossAtSurface {
-    /// Flag toggling whether the parameters are valid
-    bool isValid{false};
-    /// the amount of lost energy at a given surface
-    double lostEnergy{0.};
-    /// the uncertainty on the lost energy
-    double invLossSigma{0.};
+    /// Is the measured energy loss valid
+    /// @returns Flag indicating the energy loss validity
+    constexpr bool isValid() const { return m_isValid; }
+
+    /// The amount of lost energy (Bethe bloch / measurement)
+    /// @returns The lost energy at the surface
+    constexpr double lostEnergy() const { return m_lostEnergy; }
+
+    /// The inverse of the uncertainty on the lost energy
+    /// @returns The inverse lost sigma
+    constexpr double invLostSigma() const { return m_invLossSigma; }
 
     /// Default constructor to construct an invalid energy loss
     ELossAtSurface() = default;
@@ -103,38 +106,49 @@ struct MaterialProperties {
     /// @param energy: The measured lost energy at the corresponding surface
     /// @param sigma: The uncertainty on the measured lost energy
     explicit ELossAtSurface(const double energy, const double sigma)
-        : isValid{std::min(energy, sigma) > Acts::s_epsilon},
-          lostEnergy{energy},
-          invLossSigma{isValid ? 1. / sigma : 0.} {}
+        : m_isValid{std::min(energy, sigma) > Acts::s_epsilon},
+          m_lostEnergy{energy},
+          m_invLossSigma{isValid ? 1. / sigma : 0.} {}
+
+   private:
+    /// Flag toggling whether the parameters are valid
+    bool m_isValid{false};
+    /// the amount of lost energy at a given surface
+    double m_lostEnergy{0.};
+    /// the uncertainty on the lost energy
+    double m_invLossSigma{0.};
   };
 
   /// Auxiliary struct to describe the material scattering at a surface
   struct ScatteringAtSurface {
-    /// Flag toggling whether the scatterer is valid
-    bool isValid{false};
-    /// The inverse uncertainty on the scattering angles calculated
-    /// using e.g. the Highland formula
-    double invSigma{0.};
+    /// Is the scattering uncertainty valid
+    constexpr bool isValid() const { return m_isValid; }
+
+    constexpr double invSigma() const { return m_invSigma; }
     /// Default constructor to construct an invalid scatterer
     ScatteringAtSurface() = default;
     /// Constructor taking the width of the scatterer
     explicit ScatteringAtSurface(const double sigma)
         : isValid{sigma > Acts::s_epsilon},
           invSigma{isValid ? 1. / sigma : 0.} {}
+
+    /// Flag toggling whether the scatterer is valid
+    bool m_isValid{false};
+    /// The inverse uncertainty on the scattering angles calculated
+    /// using e.g. the Highland formula
+    double m_invSigma{0.};
   };
+
+  void updateTrackParameters(BoundVector& trackPars) {}
 
   /// @brief Constructor to initialize material properties.
   ///
-  /// @param pramIdx: Index of the first material parameter inside the extended vector
   /// @param scatteringAngles_ The vector of scattering angles.
   /// @param invCovarianceMaterial_ The inverse covariance of the material.
   /// @param materialIsValid_ A boolean flag indicating whether the material is valid.
-  explicit MaterialProperties(const std::size_t paramIdx,
-                              ScatteringAtSurface&& scatterer,
+  explicit MaterialProperties(ScatteringAtSurface&& scatterer,
                               ELossAtSurface&& eLoss)
-      : m_idx{paramIdx},
-        m_scatterer{std::move(scatterer)},
-        m_eloss{std::move(eLoss)} {}
+      : m_scatterer{std::move(scatterer)}, m_eloss{std::move(eLoss)} {}
 
   /// @brief Accessor for the scattering angles (const version)
   /// @return Const reference to the vector of scattering angles
@@ -150,19 +164,23 @@ struct MaterialProperties {
 
   /// @brief Accessor for the material validity flag
   /// @return True if material is valid for scattering calculations, false for vacuum or zero thickness
-  bool materialIsValid() const {
-    return m_scatterer.isValid || m_eloss.isValid;
+  constexpr bool materialIsValid() const {
+    return m_scatterer.isValid() || m_eloss.isValid();
   }
 
   /// Number of dimensions from the material scatterer
   /// @return Number of dimensions from the material scatterer to the parameter vector
-  std::size_t nDim() const {
-    return (m_scatterer.isValid ? 2ul : 0ul) + (m_eloss.isValid ? 1ul : 0ul);
+  constexpr std::size_t nDim() const {
+    return (m_scatterer.isValid() ? 2ul : 0ul) +
+           (m_eloss.isValid() ? 1ul : 0ul);
   }
-  /// First index of the material properties inside the parameter vector
-  /// @return The index inside the parameter vector where the material
-  ///         parameters are stored
-  constexpr std::size_t index() const { return m_idx; }
+  ScatteringAtSurface& scatterer() { return m_scatterer; }
+
+  const ScatteringAtSurface& scatterer() const { return m_scatterer; }
+
+  ELossAtSurface& energyLoss() { return m_eloss; }
+
+  const ELossAtSurface& energyLoss() const { return m_eloss; }
 
  private:
   /// Vector of scattering angles. The vector is usually all zeros except for
@@ -514,7 +532,9 @@ template <typename track_state_t>
 void addMaterialToGx2fSums(
     Gx2fSystem& extendedSystem,
     const std::unordered_map<GeometryIdentifier, MaterialProperties>&
-        materialMap, const track_state_t& trackState, const Logger& logger) {
+        materialMap,
+    const track_state_t& trackState, std::size_t& deltaPosition,
+    std::vector<GeometryIdentifier>& geoIdVector, const Logger& logger) {
   // Get and store geoId for the current material surface
   const GeometryIdentifier geoId = trackState.referenceSurface().geometryId();
   const auto materialMapId = materialMap.find(geoId);
@@ -522,81 +542,64 @@ void addMaterialToGx2fSums(
     ACTS_ERROR("No material properties found for surface " << geoId);
     throw std::runtime_error("No material properties found for surface.");
   }
-
+  /// Invalid material state
+  if (materialMapId->second.nDim() == 0ul) {
+    return;
+  }
+  geoIdVector.push_back(geoId);
   // The position, where we need to insert the values in aMatrix and bVector
-  const std::size_t deltaPosition = materialMapId->second.index();
+  const std::size_t stateIdx = deltaPosition;
+  deltaPosition += materialMapId->second.nDim();
 
   const BoundVector& scatteringAngles =
       materialMapId->second.scatteringAngles();
+  if (materialMapId->second.scatterer().isValid()) {
+    const double invCovTheta =
+        Acts::square(materialMapId->second.scatterer().invSigma());
+    const double sinThetaLoc = std::sin(trackState.smoothed()[eBoundTheta]);
+    const double invCovPhi = invCovTheta * Acts::square(sinThetaLoc);
 
-  const double invCovTheta = materialMapId->second.invCovarianceMaterial();
-  const double sinThetaLoc = std::sin(trackState.smoothed()[eBoundTheta]);
-  const double invCovPhi = invCovTheta * sinThetaLoc * sinThetaLoc;
+    // Phi contribution
+    extendedSystem.aMatrix()(stateIdx, stateIdx) += invCovPhi;
+    extendedSystem.bVector()(stateIdx, 0) -=
+        invCovPhi * scatteringAngles[eBoundPhi];
+    extendedSystem.chi2() +=
+        invCovPhi * Acts::square(scatteringAngles[eBoundPhi]);
 
-  // Phi contribution
-  extendedSystem.aMatrix()(deltaPosition, deltaPosition) += invCovPhi;
-  extendedSystem.bVector()(deltaPosition, 0) -=
-      invCovPhi * scatteringAngles[eBoundPhi];
-  extendedSystem.chi2() +=
-      invCovPhi * scatteringAngles[eBoundPhi] * scatteringAngles[eBoundPhi];
+    // Theta Contribution
+    extendedSystem.aMatrix()(stateIdx + 1, stateIdx + 1) += invCovTheta;
+    extendedSystem.bVector()(stateIdx + 1, 0) -=
+        invCovTheta * scatteringAngles[eBoundTheta];
+    extendedSystem.chi2() +=
+        invCovTheta * Acts::square(scatteringAngles[eBoundTheta]);
+    ACTS_VERBOSE(
+        "Scattering contributions in addMaterialToGx2fSums:\n"
+        << "    invCov:        " << invCovPhi << "\n"
+        << "    sinThetaLoc:   " << sinThetaLoc << "\n"
+        << "    Phi:\n"
+        << "        scattering angle:     " << scatteringAngles[eBoundPhi]
+        << "\n"
+        << "        aMatrix contribution: " << invCovPhi << "\n"
+        << "        bVector contribution: "
+        << invCovPhi * scatteringAngles[eBoundPhi] << "\n"
+        << "        chi2sum contribution: "
+        << invCovPhi * Acts::square(scatteringAngles[eBoundPhi]) << "\n"
+        << "    Theta:\n"
+        << "        scattering angle:     " << scatteringAngles[eBoundTheta]
+        << "\n"
+        << "        aMatrix contribution: " << invCovTheta << "\n"
+        << "        bVector contribution: "
+        << invCovTheta * scatteringAngles[eBoundTheta] << "\n"
+        << "        chi2sum contribution: "
+        << invCovTheta * Acts::square(scatteringAngles[eBoundTheta]));
+  }
 
-  // Theta Contribution
-  extendedSystem.aMatrix()(deltaPosition + 1, deltaPosition + 1) += invCovTheta;
-  extendedSystem.bVector()(deltaPosition + 1, 0) -=
-      invCovTheta * scatteringAngles[eBoundTheta];
-  extendedSystem.chi2() += invCovTheta * scatteringAngles[eBoundTheta] *
-                           scatteringAngles[eBoundTheta];
-
-  // q over p contribution
-  double residdeltaQOverP{0.};
-  double invCovQOverP{0.};
-  /// if(energyLoss){
-  ///   ACTS_VERBOSE("Fitting energy loss");
-  ///   invCovQOverP = materialMapId->second.invCovarianceQOverP();
-  ///   residdeltaQOverP = materialMapId->second.deltaQOverP() -
-  ///   materialMapId->second.deltaQOverPexpected(); ACTS_VERBOSE(" deltaQOverP:
-  ///   " << materialMapId->second.deltaQOverP()); ACTS_VERBOSE("
-  ///   deltaQOverPexpected: " << materialMapId->second.deltaQOverPexpected());
-  ///   ACTS_VERBOSE("    invCovQOverP: " << invCovQOverP);
-  ///   ACTS_VERBOSE("    residdeltaQOverP: " << residdeltaQOverP);
-  ///   extendedSystem.aMatrix()(deltaPosition + 2, deltaPosition + 2) +=
-  ///   invCovQOverP; extendedSystem.bVector()(deltaPosition + 2, 0) -=
-  ///       invCovQOverP * residdeltaQOverP;
-  ///   extendedSystem.chi2() += invCovQOverP * residdeltaQOverP *
-  ///   residdeltaQOverP;
-  /// }
-  ACTS_VERBOSE(
-      "Contributions in addMaterialToGx2fSums:\n"
-      << "    invCov:        " << invCovPhi << "\n"
-      << "    sinThetaLoc:   " << sinThetaLoc << "\n"
-      << "    deltaPosition: " << deltaPosition << "\n"
-      << "    Phi:\n"
-      << "        scattering angle:     " << scatteringAngles[eBoundPhi] << "\n"
-      << "        aMatrix contribution: " << invCovPhi << "\n"
-      << "        bVector contribution: "
-      << invCovPhi * scatteringAngles[eBoundPhi] << "\n"
-      << "        chi2sum contribution: "
-      << invCovPhi * scatteringAngles[eBoundPhi] * scatteringAngles[eBoundPhi]
-      << "\n"
-      << "    Theta:\n"
-      << "        scattering angle:     " << scatteringAngles[eBoundTheta]
-      << "\n"
-      << "        aMatrix contribution: " << invCovTheta << "\n"
-      << "        bVector contribution: "
-      << invCovTheta * scatteringAngles[eBoundTheta] << "\n"
-      << "        chi2sum contribution: "
-      << invCovTheta * scatteringAngles[eBoundTheta] *
-             scatteringAngles[eBoundTheta]
-      << "\n"
-      << " Energy loss:\n"
-      << "        energy loss residual: " << residdeltaQOverP << "\n"
-      << "        aMatrix contribution: " << invCovQOverP << "\n"
-      << "        bVector contribution: " << invCovQOverP * residdeltaQOverP
-      << "\n"
-      << "        chi2sum contribution: "
-      << invCovQOverP * residdeltaQOverP * residdeltaQOverP << "\n");
-
-  return;
+  if (materialMapId->second.energyLoss().isValid()) {
+    const std::size_t eLossIdx =
+        stateIdx + (materialMapId->second.nDim() - 1ul);
+    extendedSystem.aMatrix()(eLossIdx, eLossIdx) = 1.;
+    ACTS_VERBOSE("Fitting energy loss");
+  }
 }
 
 /// @brief Convert an energy loss into the corresponding change in q/p
@@ -641,35 +644,22 @@ double computeDeltaQOverPFromEnergyLoss(
 /// @param logger A logger instance
 template <TrackProxyConcept track_proxy_t>
 void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
-                    const bool multipleScattering, 
                     const std::unordered_map<GeometryIdentifier,
                                              MaterialProperties>& materialMap,
+                    std::vector<GeometryIdentifier>& geoIdVector,
                     const Logger& logger) {
   std::vector<BoundMatrix> jacobianFromStart;
   jacobianFromStart.emplace_back(BoundMatrix::Identity());
-
+  std::size_t deltaPosition{eBoundSize};
+  geoIdVector.reserve(track.nTrackStates());
   for (const auto& trackState : track.trackStates()) {
     // Get and store geoId for the current surface
     const GeometryIdentifier geoId = trackState.referenceSurface().geometryId();
     ACTS_DEBUG("Start to investigate trackState on surface " << geoId);
     const auto typeFlags = trackState.typeFlags();
-    const bool stateHasMeasurement = typeFlags.hasMeasurement();
-    const bool stateHasMaterial = typeFlags.hasMaterial();
-
-    // First we figure out, if we would need to look into material
-    // surfaces at all. Later, we also check, if the material slab is
-    // valid, otherwise we modify this flag to ignore the material
-    // completely.
-    bool doMaterial = multipleScattering && stateHasMaterial;
-    if (doMaterial) {
-      const auto materialMapId = materialMap.find(geoId);
-      assert(materialMapId != materialMap.end() &&
-             "No scattering angles found for material surface.");
-      doMaterial = doMaterial && materialMapId->second.materialIsValid();
-    }
 
     // We only consider states with a measurement (and/or material)
-    if (!stateHasMeasurement && !doMaterial) {
+    if (!typeFlags.hasMeasurement() && !typeFlags.hasMaterial()) {
       ACTS_DEBUG("    Skip state.");
       continue;
     }
@@ -680,7 +670,7 @@ void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
     }
 
     // Handle measurement
-    if (stateHasMeasurement) {
+    if (typeFlags.hasMeasurement()) {
       ACTS_DEBUG("    Handle measurement.");
 
       const auto measDim = trackState.calibratedSize();
@@ -701,63 +691,15 @@ void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
     }
 
     // Handle material
-    if (doMaterial) {
+    if (typeFlags.hasMaterial()) {
       ACTS_DEBUG("    Handle material");
       // Add for this material a new Jacobian, starting from this surface.
       jacobianFromStart.emplace_back(BoundMatrix::Identity());
-
       // Add the material contribution to the system
-      addMaterialToGx2fSums(extendedSystem, materialMap,
-                             trackState, logger);
-
+      addMaterialToGx2fSums(extendedSystem, materialMap, trackState,
+                            deltaPosition, geoIdVector, logger);
     }
   }
-}
-
-/// @brief Count the valid material states in a track for scattering calculations.
-///
-/// This function counts the valid material surfaces encountered in a track
-/// by examining each track state. The count is based on the presence of
-/// material flags and the availability of scattering information for each
-/// surface.
-///
-/// @tparam track_proxy_t The type of the track proxy
-///
-/// @param track A constant track proxy to inspect
-/// @param materialMap Map of geometry identifiers to scattering properties,
-///        containing scattering angles and validation status
-/// @param logger A logger instance
-/// @return Number of valid material states in the track
-template <TrackProxyConcept track_proxy_t>
-std::size_t countMaterialStates(
-    const track_proxy_t track,
-    const std::unordered_map<GeometryIdentifier, MaterialProperties>&
-        materialMap,
-    const Logger& logger) {
-  std::size_t nMaterialSurfaces = 0;
-  ACTS_DEBUG("Count the valid material surfaces.");
-  for (const auto& trackState : track.trackStates()) {
-    const auto typeFlags = trackState.typeFlags();
-    const bool stateHasMaterial = typeFlags.hasMaterial();
-
-    if (!stateHasMaterial) {
-      continue;
-    }
-
-    // Get and store geoId for the current material surface
-    const GeometryIdentifier geoId = trackState.referenceSurface().geometryId();
-
-    const auto materialMapId = materialMap.find(geoId);
-    assert(materialMapId != materialMap.end() &&
-           "No material properties found for material surface.");
-    if (!materialMapId->second.materialIsValid()) {
-      continue;
-    }
-
-    nMaterialSurfaces++;
-  }
-
-  return nMaterialSurfaces;
 }
 
 /// @brief Solve the gx2f system to get the delta parameters for the update
@@ -774,16 +716,13 @@ Eigen::VectorXd computeGx2fDeltaParams(const Gx2fSystem& extendedSystem);
 ///
 /// @param params Parameters to be updated
 /// @param deltaParamsExtended Delta parameters for bound parameter and scattering angles
-/// @param nMaterialSurfaces Number of material surfaces in the track
 /// @param materialMap Map of geometry identifiers to scattering properties,
 ///        containing all scattering angles and covariances
 /// @param geoIdVector Vector of geometry identifiers corresponding to material surfaces
 void updateGx2fParams(
     BoundTrackParameters& params, const Eigen::VectorXd& deltaParamsExtended,
-    const std::size_t nMaterialSurfaces,
     std::unordered_map<GeometryIdentifier, MaterialProperties>& materialMap,
-    const std::vector<GeometryIdentifier>& geoIdVector,
-    const bool energyLoss = false);
+    const std::vector<GeometryIdentifier>& geoIdVector);
 
 /// @brief Calculate and update the covariance of the fitted parameters
 ///
@@ -853,6 +792,8 @@ class Gx2Fitter {
    public:
     /// Broadcast the result_type
     using result_type = Gx2FitterResult<traj_t>;
+
+    using TrackStateProxy_t = typename traj_t::TrackStateProxy;
 
     /// The target surface
     const Surface* targetSurface = nullptr;
@@ -933,7 +874,7 @@ class Gx2Fitter {
 
       // We are only interested in surfaces. If we are not on a surface, we
       // continue the navigation
-      auto surface = navigator.currentSurface(state.navigation);
+      const Surface* surface = navigator.currentSurface(state.navigation);
       if (surface == nullptr) {
         return Result<void>::success();
       }
@@ -946,187 +887,22 @@ class Gx2Fitter {
                  << ", has material: "
                  << (surface->hasMaterial() ? "yes" : "no"));
 
-      // First we figure out, if we would need to look into material surfaces at
-      // all. Later, we also check, if the material slab is valid, otherwise we
-      // modify this flag to ignore the material completely.
-
-      // Found material - add a scatteringAngles entry if not done yet and
-      // energy loss if enabled. Handling will happen later
-      if (surface->hasMaterial() && (doMultipleScattering || doEnergyLoss)) {
-        ACTS_DEBUG("    The surface contains material, ...");
-        assert(materialMap != nullptr);
-        auto materialMapId = materialMap->find(geoId);
-        if (materialMapId == materialMap->end()) {
-          ACTS_DEBUG("    ... create entry in material map.");
-
-          const Result<MaterialSlab> slabResult =
-              Acts::detail::evaluateMaterialSlab(
-                  state, stepper, *surface,
-                  Acts::detail::determineMaterialUpdateMode(
-                      state, navigator, MaterialUpdateMode::FullUpdate));
-          if (!slabResult.ok()) {
-            ACTS_DEBUG("GlobalChiSquareFitter | "
-                       << "Failed to evaluate material slab: "
-                       << slabResult.error());
-            return Result<void>::failure(slabResult.error());
-          }
-          const MaterialSlab& slab = *slabResult;
-
-          MaterialProperties::ELossAtSurface eLoss{};
-          MaterialProperties::ScatteringAtSurface scatterer{};
-          if (!slab.isVacuum()) {
-            const auto& particle =
-                parametersWithHypothesis->particleHypothesis();
-
-            const double sigma =
-                static_cast<double>(Acts::computeMultipleScatteringTheta0(
-                    slab, particle.absolutePdg(), particle.mass(),
-                    static_cast<float>(
-                        parametersWithHypothesis->parameters()[eBoundQOverP]),
-                    particle.absoluteCharge()));
-            ACTS_VERBOSE(
-                "        The Highland formula gives sigma = " << sigma);
-
-            scatterer = MaterialProperties::ScatteringAtSurface{sigma};
-
-          } else {
-            ACTS_VERBOSE("        Material slab is not valid.");
-          }
-
-          if (doEnergyLoss) {
-            if (extensions.elossAccumulator.isConnected()) {
-              eLoss = extensions.elossAccumulator(
-                  *calibrationContext, stepper.position(state.stepping),
-                  stepper.direction(state.stepping), *surface
-
-              );
-            }
-            if (!eLoss.isValid) {
-              const auto& particle =
-                  parametersWithHypothesis->particleHypothesis();
-
-              eLoss = MaterialProperties::ELossAtSurface{
-                  computeEnergyLossMean(
-                      slab, particle.absolutePdg(), particle.mass(),
-                      parametersWithHypothesis->parameters()[eBoundQOverP],
-                      particle.absoluteCharge()),
-                  /// Energy loss uncertainty
-                  static_cast<double>(Acts::computeEnergyLossLandauSigma(
-                      slab, particle.mass(),
-                      static_cast<float>(
-                          parametersWithHypothesis->parameters()[eBoundQOverP]),
-                      particle.absoluteCharge()))};
-            }
-          }
-          materialMapId =
-              materialMap
-                  ->emplace(geoId, MaterialProperties{result.materialParamIdx,
-                                                      std::move(scatterer),
-                                                      std::move(eLoss)})
-                  .first;
-          result.materialParamIdx += materialMapId->second.nDim();
-
-        } else {
-          ACTS_DEBUG("    ... found entry in scattering map.");
-        }
+      auto matFillResult = fillMaterialMap(state, stepper, navigator, result);
+      if (!matFillResult.ok()) {
+        return matFillResult.error();
       }
 
+      auto trackStateResult = makeTrackState(state, stepper, navigator, result);
+      if (!trackStateResult.ok()) {
+        return matFillResult.error();
+      }
       // Here we handle all measurements
       if (auto sourceLinkIt = inputMeasurements->find(surface);
           sourceLinkIt != inputMeasurements->end()) {
-        ACTS_DEBUG("    The surface contains a measurement.");
-
-        // Transport the covariance to the surface
-        stepper.transportCovarianceToBound(state.stepping, *surface,
-                                           freeToBoundCorrection);
-
-        // TODO generalize the update of the currentTrackIndex
-        auto& fittedStates = *result.fittedStates;
-
-        // Add a <trackStateMask> TrackState entry multi trajectory. This
-        // allocates storage for all components, which we will set later.
-        typename traj_t::TrackStateProxy trackStateProxy =
-            fittedStates.makeTrackState(Gx2fConstants::trackStateMask,
-                                        result.lastTrackIndex);
-        const std::size_t currentTrackIndex = trackStateProxy.index();
-
-        // Set the trackStateProxy components with the state from the ongoing
-        // propagation
-        {
-          trackStateProxy.setReferenceSurface(surface->getSharedPtr());
-          // Bind the transported state to the current surface
-          auto res = stepper.boundState(state.stepping, *surface, false,
-                                        freeToBoundCorrection);
-          if (!res.ok()) {
-            return res.error();
-          }
-          // Not const since, we might need to update with scattering angles
-          auto& [boundParams, jacobian, pathLength] = *res;
-
-          // For material surfaces, we also update the angles with the
-          // available scattering information
-          if (doMaterial) {
-            ACTS_DEBUG("    Update parameters with scattering angles.");
-            const auto materialMapId = materialMap->find(geoId);
-            ACTS_VERBOSE(
-                "        scatteringAngles: "
-                << materialMapId->second.scatteringAngles().transpose());
-            ACTS_VERBOSE("        boundParams before the update: "
-                         << boundParams.parameters().transpose());
-            boundParams.parameters() +=
-                materialMapId->second.scatteringAngles();
-            ACTS_VERBOSE("        boundParams after the update: "
-                         << boundParams.parameters().transpose());
-
-            // update parameters for energty loss if energy loss is also enabled
-            if (doEnergyLoss) {
-              ACTS_VERBOSE("   Update parameters with energy loss.");
-              ACTS_VERBOSE("  Energy Loss deltaQoverP: "
-                           << materialMapId->second.deltaQOverP());
-              ACTS_VERBOSE("        boundParams before the update: "
-                           << boundParams.parameters().transpose());
-              boundParams.parameters()[eBoundQOverP] +=
-                  materialMapId->second.deltaQOverP();
-              ACTS_VERBOSE("        boundParams after the update: "
-                           << boundParams.parameters().transpose());
-            }
-          }
-
-          // Fill the track state
-          trackStateProxy.smoothed() = boundParams.parameters();
-          trackStateProxy.smoothedCovariance() = state.stepping.cov;
-
-          trackStateProxy.jacobian() = jacobian;
-          trackStateProxy.pathLength() = pathLength;
-
-          if (doMaterial) {
-            stepper.update(state.stepping,
-                           transformBoundToFreeParameters(
-                               trackStateProxy.referenceSurface(),
-                               state.geoContext, trackStateProxy.smoothed()),
-                           trackStateProxy.smoothed(),
-                           trackStateProxy.smoothedCovariance(), *surface);
-          }
-        }
-
-        // We have smoothed parameters, so calibrate the uncalibrated input
-        // measurement
-        extensions.calibrator(state.geoContext, *calibrationContext,
-                              sourceLinkIt->second, trackStateProxy);
-
-        // Get and set the type flags
-        auto typeFlags = trackStateProxy.typeFlags();
-        typeFlags.setHasParameters();
-        if (surfaceHasMaterial) {
-          typeFlags.setHasMaterial();
-        }
-
-        // Set the measurement type flag
-        typeFlags.setIsMeasurement();
         // We count the processed measurement
         ++result.processedMeasurements;
 
-        result.lastMeasurementIndex = currentTrackIndex;
+        result.lastMeasurementIndex = result.lastTrackIndex;
         result.lastTrackIndex = currentTrackIndex;
 
         // TODO check for outlier first
@@ -1143,182 +919,203 @@ class Gx2Fitter {
         return Result<void>::success();
       }
 
-      if (doMaterial) {
-        // Here we handle material for multipleScattering. If holes exist, we
-        // also handle them already. We create a full trackstate (unlike for
-        // simple holes), since we need to evaluate the material later
-        ACTS_DEBUG(
-            "    The surface contains no measurement, but material and maybe "
-            "a hole.");
-
-        // Transport the covariance to the surface
-        stepper.transportCovarianceToBound(state.stepping, *surface,
-                                           freeToBoundCorrection);
-
-        // TODO generalize the update of the currentTrackIndex
-        auto& fittedStates = *result.fittedStates;
-
-        // Add a <trackStateMask> TrackState entry multi trajectory. This
-        // allocates storage for all components, which we will set later.
-        typename traj_t::TrackStateProxy trackStateProxy =
-            fittedStates.makeTrackState(Gx2fConstants::trackStateMask,
-                                        result.lastTrackIndex);
-        const std::size_t currentTrackIndex = trackStateProxy.index();
-
-        // Set the trackStateProxy components with the state from the ongoing
-        // propagation
-        {
-          trackStateProxy.setReferenceSurface(surface->getSharedPtr());
-          // Bind the transported state to the current surface
-          auto res = stepper.boundState(state.stepping, *surface, false,
-                                        freeToBoundCorrection);
-          if (!res.ok()) {
-            return res.error();
-          }
-          // Not const since, we might need to update with scattering angles
-          auto& [boundParams, jacobian, pathLength] = *res;
-
-          // For material surfaces, we also update the angles with the
-          // available scattering information
-          // We can skip the if here, since we already know, that we do
-          // multipleScattering and have material
-          ACTS_DEBUG("    Update parameters with scattering angles.");
-          const auto materialMapId = materialMap->find(geoId);
-          ACTS_VERBOSE("        scatteringAngles: "
-                       << materialMapId->second.scatteringAngles().transpose());
-          ACTS_VERBOSE("        boundParams before the update: "
-                       << boundParams.parameters().transpose());
-          boundParams.parameters() += materialMapId->second.scatteringAngles();
-          ACTS_VERBOSE("        boundParams after the update: "
-                       << boundParams.parameters().transpose());
-          if (doEnergyLoss) {
-            ACTS_VERBOSE("   Update parameters with energy loss.");
-            ACTS_VERBOSE("  Energy Loss deltaQoverP: "
-                         << materialMapId->second.deltaQOverP());
-
-            ACTS_VERBOSE("  boundParams before the update: "
-                         << boundParams.parameters().transpose());
-            boundParams.parameters()[eBoundQOverP] +=
-                materialMapId->second.deltaQOverP();
-            ACTS_VERBOSE("        boundParams after the update: "
-                         << boundParams.parameters().transpose());
-          }
-
-          // Fill the track state
-          trackStateProxy.smoothed() = boundParams.parameters();
-          trackStateProxy.smoothedCovariance() = state.stepping.cov;
-
-          trackStateProxy.jacobian() = jacobian;
-          trackStateProxy.pathLength() = pathLength;
-
-          stepper.update(state.stepping,
-                         transformBoundToFreeParameters(
-                             trackStateProxy.referenceSurface(),
-                             state.geoContext, trackStateProxy.smoothed()),
-                         trackStateProxy.smoothed(),
-                         trackStateProxy.smoothedCovariance(), *surface);
-        }
-
-        // Get and set the type flags
-        auto typeFlags = trackStateProxy.typeFlags();
-        typeFlags.setHasParameters();
-        typeFlags.setHasMaterial();
-
-        // Set hole only, if we are on a sensitive surface and had
-        // measurements before (no holes before the first measurement)
-        const bool precedingMeasurementExists = (result.measurementStates > 0);
-        if (surfaceIsSensitive && precedingMeasurementExists) {
-          ACTS_DEBUG("    Surface is also sensitive. Marked as hole.");
-          typeFlags.setIsHole();
-
-          // Count the missed surface
-          result.missedActiveSurfaces.push_back(surface);
-        }
-
-        result.lastTrackIndex = currentTrackIndex;
-
-        ++result.processedStates;
-
-        return Result<void>::success();
-      }
-
-      if (surfaceIsSensitive || surfaceHasMaterial) {
-        // Here we handle holes. If material hasn't been handled before
-        // (because multipleScattering is turned off), we will also handle it
-        // here
-        if (doMultipleScattering) {
-          ACTS_DEBUG(
-              "    The surface contains no measurement, but maybe a hole.");
-        } else {
-          ACTS_DEBUG(
-              "    The surface contains no measurement, but maybe a hole "
-              "and/or material.");
-        }
-
-        // We only create track states here if there is already a measurement
-        // detected (no holes before the first measurement) or if we encounter
-        // material
-        const bool precedingMeasurementExists = (result.measurementStates > 0);
-        if (!precedingMeasurementExists && !surfaceHasMaterial) {
-          ACTS_DEBUG(
-              "    Ignoring hole, because there are no preceding "
-              "measurements.");
-          return Result<void>::success();
-        }
-
-        auto& fittedStates = *result.fittedStates;
-
-        // Add a <trackStateMask> TrackState entry multi trajectory. This
-        // allocates storage for all components, which we will set later.
-        typename traj_t::TrackStateProxy trackStateProxy =
-            fittedStates.makeTrackState(Gx2fConstants::trackStateMask,
-                                        result.lastTrackIndex);
-        const std::size_t currentTrackIndex = trackStateProxy.index();
-
-        // Set the trackStateProxy components with the state from the
-        // ongoing propagation
-        {
-          trackStateProxy.setReferenceSurface(surface->getSharedPtr());
-          // Bind the transported state to the current surface
-          auto res = stepper.boundState(state.stepping, *surface, false,
-                                        freeToBoundCorrection);
-          if (!res.ok()) {
-            return res.error();
-          }
-          const auto& [boundParams, jacobian, pathLength] = *res;
-
-          // Fill the track state
-          trackStateProxy.smoothed() = boundParams.parameters();
-          trackStateProxy.smoothedCovariance() = state.stepping.cov;
-
-          trackStateProxy.jacobian() = jacobian;
-          trackStateProxy.pathLength() = pathLength;
-        }
-
-        // Get and set the type flags
-        auto typeFlags = trackStateProxy.typeFlags();
-        typeFlags.setHasParameters();
-        if (surfaceHasMaterial) {
-          ACTS_DEBUG("    It is material.");
-          typeFlags.setHasMaterial();
-        }
-
-        // Set hole only, if we are on a sensitive surface
-        if (surfaceIsSensitive && precedingMeasurementExists) {
-          ACTS_DEBUG("    It is a hole.");
-          typeFlags.setIsHole();
-          // Count the missed surface
-          result.missedActiveSurfaces.push_back(surface);
-        }
-
-        result.lastTrackIndex = currentTrackIndex;
-
-        ++result.processedStates;
-
-        return Result<void>::success();
-      }
-
       ACTS_DEBUG("    The surface contains no measurement/material/hole.");
+      return Result<void>::success();
+    }
+
+    template <typename propagator_state_t, typename stepper_t,
+              typename navigator_t>
+    Result<void> makeTrackState(propagator_state_t& state,
+                                const stepper_t& stepper,
+                                const navigator_t& navigator,
+                                result_type& result) const {
+      const Surface* surface = navigator.currentSurface(state.navigation);
+
+      const GeometryIdentifier geoId = surface->geometryId();
+
+      auto sourceLinkIt = inputMeasurements->find(surface);
+      const bool isSensitive =
+          surface->isSensitive() || sourceLinkIt != inputMeasurements->end();
+      const bool hasMaterial =
+          surface->hasMaterial() && materialMap->at(geoId).isValid();
+      /// The surface is neither sensitive or it carries material
+      if (!isSensitive && !hasMaterial) {
+        return Result<void>::success();
+      }
+
+      auto& fittedStates = *result.fittedStates;
+
+      // Add a <trackStateMask> TrackState entry multi trajectory. This
+      // allocates storage for all components, which we will set later.
+      TrackStateProxy_t trackStateProxy = fittedStates.makeTrackState(
+          Gx2fConstants::trackStateMask, result.lastTrackIndex);
+
+      result.lastTrackIndex = trackStateProxy.index();
+
+      auto typeFlags = trackStateProxy.typeFlags();
+      typeFlags.setHasParameters();
+
+      // Transport the covariance to the surface
+      stepper.transportCovarianceToBound(state.stepping, *surface,
+                                         freeToBoundCorrection);
+
+      // Set the trackStateProxy components with the state from the ongoing
+      // propagation
+      trackStateProxy.setReferenceSurface(surface->getSharedPtr());
+
+      // Bind the transported state to the current surface
+      auto res = stepper.boundState(state.stepping, *surface, false,
+                                    freeToBoundCorrection);
+      if (!res.ok()) {
+        return res.error();
+      }
+      // Not const since, we might need to update with scattering angles
+      auto& [boundParams, jacobian, pathLength] = *res;
+
+      trackStateProxy.smoothedCovariance() = state.stepping.cov;
+
+      // Fill the track state
+      trackStateProxy.smoothed() = boundParams.parameters();
+
+      trackStateProxy.jacobian() = jacobian;
+      trackStateProxy.pathLength() = pathLength;
+
+      /// There is no material update
+      if (hasMaterial) {
+        trackStateProxy.setHasMaterial();
+
+        // track
+        ACTS_DEBUG("    Update parameters with material effects.");
+        ACTS_VERBOSE("        boundParams before the update: "
+                     << trackStateProxy.smoothed().transpose());
+
+        materialMap->at(geoId).updateParameters(trackStateProxy.smoothed());
+        ACTS_VERBOSE("        boundParams before the update: "
+                     << trackStateProxy.smoothed().transpose());
+
+        stepper.update(state.stepping,
+                       transformBoundToFreeParameters(
+                           trackStateProxy.referenceSurface(), state.geoContext,
+                           trackStateProxy.smoothed()),
+                       trackStateProxy.smoothed(),
+                       trackStateProxy.smoothedCovariance(), *surface);
+      }
+      if (!isSensitive) {
+        return Result<void>::success();
+      }
+
+      if (sourceLinkIt == inputMeasurements->end()) {
+        typeFlags.setIsHole();
+        return Result<void>::success();
+      }
+      typeFlags.setIsMeasurement();
+
+      // We have smoothed parameters, so calibrate the uncalibrated input
+      // measurement
+      extensions.calibrator(state.geoContext, *calibrationContext,
+                            sourceLinkIt->second, trackStateProxy);
+
+      return Result<void>::success();
+    }
+
+    template <typename propagator_state_t, typename stepper_t,
+              typename navigator_t>
+    Result<void> fillMaterialMap(propagator_state_t& state,
+                                 const stepper_t& stepper,
+                                 const navigator_t& navigator,
+                                 result_type& result) const {
+      if (!doMultipleScattering && !doEnergyLoss) {
+        return Result<void>::success();
+      }
+      const Surface* surface = navigator.currentSurface(state.navigation);
+      if (!surface->hasMaterial()) {
+        return Result<void>::success();
+      }
+
+      // Found material - add a scatteringAngles entry if not done yet and
+      // energy loss if enabled. Handling will happen later
+
+      ACTS_DEBUG("    The surface contains material, ...");
+      if (!materialMap) {
+        ACTS_ERROR(" Material map is undefined");
+        return Result<void>::failure();
+      }
+
+      auto materialMapId = materialMap->find(geoId);
+      /// Entry is already present. Nothing to be done
+      if (materialMapId != materialMap->end()) {
+        ACTS_VERBOSE("   ....  entry is already in the material map.")
+        result.materialParamIdx += materialMapId->second.nDim();
+        return Result<void>::success();
+      }
+
+      ACTS_DEBUG("    ... create entry in material map.");
+
+      const Result<MaterialSlab> slabResult =
+          Acts::detail::evaluateMaterialSlab(
+              state, stepper, *surface,
+              Acts::detail::determineMaterialUpdateMode(
+                  state, navigator, MaterialUpdateMode::FullUpdate));
+      if (!slabResult.ok()) {
+        ACTS_DEBUG("GlobalChiSquareFitter | "
+                   << "Failed to evaluate material slab: "
+                   << slabResult.error());
+        return Result<void>::failure(slabResult.error());
+      }
+      const MaterialSlab& slab = *slabResult;
+      const bool goodSlab = !slab.isVacuum();
+
+      MaterialProperties::ELossAtSurface eLoss{};
+      MaterialProperties::ScatteringAtSurface scatterer{};
+
+      if (goodSlab) {
+        const auto& particle = parametersWithHypothesis->particleHypothesis();
+
+        const double sigma =
+            static_cast<double>(Acts::computeMultipleScatteringTheta0(
+                slab, particle.absolutePdg(), particle.mass(),
+                static_cast<float>(
+                    parametersWithHypothesis->parameters()[eBoundQOverP]),
+                particle.absoluteCharge()));
+        ACTS_VERBOSE("        The Highland formula gives sigma = " << sigma);
+
+        scatterer = MaterialProperties::ScatteringAtSurface{sigma};
+
+      } else {
+        ACTS_VERBOSE("        Material slab is not valid.");
+      }
+
+      if (doEnergyLoss) {
+        if (extensions.elossAccumulator.isConnected()) {
+          eLoss = extensions.elossAccumulator(
+              *calibrationContext, stepper.position(state.stepping),
+              stepper.direction(state.stepping), *surface
+
+          );
+        }
+        if (!eLoss.isValid() && goodSlab) {
+          const auto& particle = parametersWithHypothesis->particleHypothesis();
+
+          eLoss = MaterialProperties::ELossAtSurface{
+              computeEnergyLossMean(
+                  slab, particle.absolutePdg(), particle.mass(),
+                  parametersWithHypothesis->parameters()[eBoundQOverP],
+                  particle.absoluteCharge()),
+              /// Energy loss uncertainty
+              static_cast<double>(Acts::computeEnergyLossLandauSigma(
+                  slab, particle.mass(),
+                  static_cast<float>(
+                      parametersWithHypothesis->parameters()[eBoundQOverP]),
+                  particle.absoluteCharge()))};
+        }
+      }
+      materialMapId =
+          materialMap
+              ->emplace(geoId, MaterialProperties{std::move(scatterer),
+                                                  std::move(eLoss)})
+              .first;
+      result.materialParamIdx += materialMapId->second.nDim();
+
       return Result<void>::success();
     }
 
@@ -1483,12 +1280,6 @@ class Gx2Fitter {
       track.tipIndex() = tipIndex;
       track.linkForward();
 
-      // We need 6 dimensions for the bound parameters and 3 * nMaterialSurfaces
-      // dimensions for the scattering angles and the enrgy loss
-      const std::size_t dimsExtendedParams =
-          energyLoss ? eBoundSize + 3 * nMaterialSurfaces
-                     : eBoundSize + 2 * nMaterialSurfaces;
-
       // System that we fill with the information gathered by the actor and
       // evaluate later
       Gx2fSystem extendedSystem{gx2fResult.materialParamIdx};
@@ -1499,8 +1290,8 @@ class Gx2Fitter {
       // all stored material in each propagation.
       std::vector<GeometryIdentifier> geoIdVector;
 
-      fillGx2fSystem(track, extendedSystem, false, energyLoss, materialMap,
-                     geoIdVector, *m_addToSumLogger);
+      fillGx2fSystem(track, extendedSystem, materialMap, geoIdVector,
+                     *m_addToSumLogger);
 
       chi2sum = extendedSystem.chi2();
 
@@ -1647,17 +1438,6 @@ class Gx2Fitter {
       track.tipIndex() = tipIndex;
       track.linkForward();
 
-      // Count the material surfaces, to set up the system. In the multiple
-      // scattering case, we need to extend our system.
-      const std::size_t nMaterialSurfaces =
-          countMaterialStates(track, materialMap, *m_addToSumLogger);
-
-      // We need 6 dimensions for the bound parameters and 3 * nMaterialSurfaces
-      // dimensions for the scattering angles and energy loss.
-      const std::size_t dimsExtendedParams =
-          energyLoss ? eBoundSize + 3 * nMaterialSurfaces
-                     : eBoundSize + 2 * nMaterialSurfaces;
-
       // System that we fill with the information gathered by the actor and
       // evaluate later
       Gx2fSystem extendedSystem{gx2fResult.materialParamIdx};
@@ -1668,8 +1448,8 @@ class Gx2Fitter {
       // all stored material in each propagation.
       std::vector<GeometryIdentifier> geoIdVector;
 
-      fillGx2fSystem(track, extendedSystem, true, energyLoss, materialMap,
-                     geoIdVector, *m_addToSumLogger);
+      fillGx2fSystem(track, extendedSystem, materialMap, geoIdVector,
+                     *m_addToSumLogger);
 
       chi2sum = extendedSystem.chi2();
 
