@@ -131,7 +131,7 @@ void addMeasurementToGx2fSumsBackend(
     ACTS_VERBOSE("    covarianceMeasurement:\n" << covarianceMeasurement);
     return;
   }
-
+  ACTS_INFO("DIE CASSY "<<jacobianFromStart.size());
   // Create an extended Jacobian. This one contains only eBoundSize rows,
   // because the rest is irrelevant. We fill it in the next steps.
   // TODO make dimsExtendedParams template with unrolling

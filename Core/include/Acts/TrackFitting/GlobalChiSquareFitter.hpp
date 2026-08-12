@@ -590,7 +590,8 @@ void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
       ACTS_DEBUG("    Skip state.");
       continue;
     }
-
+    // jacobianFromStart.emplace_back(trackState.jacobian());
+    // jacobianFromStart[0] = trackState.jacobian();
     // update all Jacobians from start
     for (auto& jac : jacobianFromStart) {
       jac = trackState.jacobian() * jac;
@@ -598,7 +599,7 @@ void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
 
     // Handle measurement
     if (typeFlags.hasMeasurement()) {
-      ACTS_DEBUG("    Handle measurement.");
+      ACTS_DEBUG("    Handle measurement. ");
 
       const auto measDim = trackState.calibratedSize();
 
@@ -1114,6 +1115,8 @@ class Gx2Fitter {
     using PropagatorOptions = typename propagator_t::template Options<Actors>;
 
     BoundTrackParameters params = sParameters;
+    params.covariance() = BoundMatrix::Identity();
+    // params.
     double chi2sum = 0;
     double oldChi2sum = std::numeric_limits<double>::max();
 
