@@ -585,16 +585,18 @@ void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
     ACTS_DEBUG("Start to investigate trackState on surface " << geoId);
     const auto typeFlags = trackState.typeFlags();
 
-    // We only consider states with a measurement (and/or material)
-    if (!typeFlags.hasMeasurement() && !typeFlags.hasMaterial()) {
-      ACTS_DEBUG("    Skip state.");
-      continue;
-    }
+
     // jacobianFromStart.emplace_back(trackState.jacobian());
     // jacobianFromStart[0] = trackState.jacobian();
     // update all Jacobians from start
     for (auto& jac : jacobianFromStart) {
       jac = trackState.jacobian() * jac;
+    }
+
+        // We only consider states with a measurement (and/or material)
+    if (!typeFlags.hasMeasurement() && !typeFlags.hasMaterial()) {
+      ACTS_DEBUG("    Skip state.");
+      continue;
     }
 
     // Handle measurement
