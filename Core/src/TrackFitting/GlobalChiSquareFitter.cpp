@@ -12,7 +12,7 @@
 
 namespace Acts::Experimental {
 
-void MaterialProperties::updateParameters(
+void Gx2fMaterialProperties::updateParameters(
     const Eigen::VectorXd& deltaParamsExtended, const std::size_t stateIdx) {
   if (m_scatterer.isValid()) {
     m_scatTheta += deltaParamsExtended[stateIdx];
@@ -24,23 +24,22 @@ void MaterialProperties::updateParameters(
   }
 }
 
-void MaterialProperties::updateTrackParameters(
+void Gx2fMaterialProperties::updateTrackParameters(
     BoundTrackParameters& trackPars) const {
   if (m_scatterer.isValid()) {
     trackPars.parameters()[eBoundPhi] += deltaPhi();
     trackPars.parameters()[eBoundTheta] += deltaTheta();
   }
-  if (false && m_eloss.isValid()) {
+  if (m_eloss.isValid()) {
     const ParticleHypothesis& hypot = trackPars.particleHypothesis();
     trackPars.parameters()[eBoundQOverP] = hypot.qOverP(
         trackPars.absoluteMomentum() - m_lostEnergy, trackPars.charge());
   }
 }
 
-void MaterialProperties::contributionToGx2fSums(Gx2fSystem& extendedSystem,
-                                                const double theta,
-                                                const std::size_t stateIdx,
-                                                const Logger& logger) const {
+void Gx2fMaterialProperties::contributionToGx2fSums(
+    Gx2fSystem& extendedSystem, const double theta, const std::size_t stateIdx,
+    const Logger& logger) const {
   if (m_scatterer.isValid()) {
     const double invCovTheta = Acts::square(m_scatterer.invSigma());
     const double sinThetaLoc = std::sin(theta);
@@ -56,6 +55,7 @@ void MaterialProperties::contributionToGx2fSums(Gx2fSystem& extendedSystem,
     extendedSystem.bVector()(stateIdx + 1, 0) -= invCovTheta * deltaTheta();
     extendedSystem.chi2() += invCovTheta * Acts::square(deltaTheta());
     ACTS_INFO("Scattering contributions in contributionToGx2fSums:\n"
+              << "     index: " << stateIdx << "-" << (stateIdx + 1) << " \n"
               << "    invCov:        " << invCovPhi << "\n"
               << "    sinThetaLoc:   " << sinThetaLoc << "\n"
               << "    Phi:\n"
@@ -77,13 +77,23 @@ void MaterialProperties::contributionToGx2fSums(Gx2fSystem& extendedSystem,
   if (m_eloss.isValid()) {
     const std::size_t eLossIdx = stateIdx + (nDim() - 1ul);
     extendedSystem.aMatrix()(eLossIdx, eLossIdx) = 1.;
-    ACTS_VERBOSE("Fitting energy loss");
+    // extendedSystem.chi2() +=
+    // Acts::square(m_eloss.invLostSigma()*(m_lostEnergy -
+    // m_eloss.lostEnergy()));
+    ACTS_VERBOSE("Energy loss contributions in contributionToGx2fSums:\n"
+                 << "       index: " << eLossIdx << " \n"
+                 << "       measured loss: " << m_eloss.lostEnergy() << "+-"
+                 << (1. / m_eloss.invLostSigma()) << ", \n"
+                 << "       currently estimated loss: " << m_lostEnergy << "\n"
+                 << "  --> chi2 contribution: "
+                 << Acts::square(m_eloss.invLostSigma() *
+                                 (m_lostEnergy - m_eloss.lostEnergy())));
   }
 }
 
 void updateGx2fParams(
     BoundTrackParameters& params, const Eigen::VectorXd& deltaParamsExtended,
-    std::unordered_map<GeometryIdentifier, MaterialProperties>& materialMap,
+    std::unordered_map<GeometryIdentifier, Gx2fMaterialProperties>& materialMap,
     const std::vector<GeometryIdentifier>& geoIdVector) {
   // update params
   params.parameters() +=
@@ -120,9 +130,10 @@ void updateGx2fCovarianceParams(BoundMatrix& fullCovariancePredicted,
 void addMeasurementToGx2fSumsBackend(
     Gx2fSystem& extendedSystem,
     const std::vector<BoundMatrix>& jacobianFromStart,
+    const std::vector<std::size_t>& materialIndices,
     const Eigen::MatrixXd& covarianceMeasurement, const BoundVector& predicted,
     const Eigen::VectorXd& measurement, const Eigen::MatrixXd& projector,
-    bool energyLoss, const Logger& logger) {
+    const Logger& logger) {
   // First, w try to invert the covariance matrix. If the inversion fails, we
   // can already abort.
   const auto safeInvCovMeasurement = safeInverse(covarianceMeasurement);
@@ -155,16 +166,16 @@ void addMeasurementToGx2fSumsBackend(
 
     // The position, where we need to insert the values in the extended Jacobian
     // accounting for material effects
-    const std::size_t deltaPosition = energyLoss
-                                          ? eBoundSize + 3 * (matSurface - 1)
-                                          : eBoundSize + 2 * (matSurface - 1);
-    if (energyLoss) {
-      extendedJacobian.block<eBoundSize, 3>(0, deltaPosition) =
-          jac * Gx2fConstants::phiThetaQOverPProjector;
-    } else {
-      extendedJacobian.block<eBoundSize, 2>(0, deltaPosition) =
-          jac * Gx2fConstants::phiThetaProjector;
-    }
+    const std::size_t deltaPosition = materialIndices.at(matSurface - 1);
+    ACTS_DEBUG("Update material jacobian " << deltaPosition << ", "
+                                           << extendedSystem.nDims());
+    // if (energyLoss) {
+    //   extendedJacobian.block<eBoundSize, 3>(0, deltaPosition) =
+    //       jac * Gx2fConstants::phiThetaQOverPProjector;
+    // } else {
+    extendedJacobian.block<eBoundSize, 2>(0, deltaPosition) =
+        jac * Gx2fConstants::phiThetaProjector;
+    // }
   }
 
   const Eigen::MatrixXd projJacobian = projector * extendedJacobian;

@@ -82,7 +82,7 @@ const Acts::Matrix<eBoundSize, 3> phiThetaQOverPProjector = [] {
 /// This struct holds the scattering angles, the inverse covariance of the
 /// material, and a validity flag indicating whether the material is valid for
 /// the scattering process.
-struct MaterialProperties {
+struct Gx2fMaterialProperties {
   /// Auxiliary struct to include the measured energy loss at a surface. If the
   /// fitter reaches a surface
   /// with material a delegate is called to evaluate the measured energy loss at
@@ -146,8 +146,8 @@ struct MaterialProperties {
   /// @param scatteringAngles_ The vector of scattering angles.
   /// @param invCovarianceMaterial_ The inverse covariance of the material.
   /// @param materialIsValid_ A boolean flag indicating whether the material is valid.
-  explicit MaterialProperties(ScatteringAtSurface&& scatterer,
-                              ELossAtSurface&& eLoss)
+  explicit Gx2fMaterialProperties(ScatteringAtSurface&& scatterer,
+                                  ELossAtSurface&& eLoss)
       : m_scatterer{std::move(scatterer)}, m_eloss{std::move(eLoss)} {}
 
   /// @brief Accessor for the material validity flag
@@ -230,7 +230,7 @@ struct Gx2FitterExtensions {
   using OutlierFinder = Delegate<bool(ConstTrackStateProxy)>;
 
   /// Type alias to measure the energy loss at a given surface
-  using ELossAccumulator = Delegate<MaterialProperties::ELossAtSurface(
+  using ELossAccumulator = Delegate<Gx2fMaterialProperties::ELossAtSurface(
       const CalibrationContext&, const Vector3& pos, const Vector3& dir,
       const Surface& matSurf)>;
 
@@ -371,7 +371,7 @@ struct Gx2FitterResult {
   std::size_t processedMeasurements{0ul};
 
   /// Index of the next material parameter
-  std::size_t materialParamIdx{eBoundSize};
+  std::vector<std::size_t> materialParamIndices{eBoundSize};
 
   /// Indicator if track fitting has been done
   bool finished = false;
@@ -491,9 +491,10 @@ struct Gx2fSystem {
 void addMeasurementToGx2fSumsBackend(
     Gx2fSystem& extendedSystem,
     const std::vector<BoundMatrix>& jacobianFromStart,
+    const std::vector<std::size_t>& materialIndices,
     const Eigen::MatrixXd& covarianceMeasurement, const BoundVector& predicted,
     const Eigen::VectorXd& measurement, const Eigen::MatrixXd& projector,
-    const bool energyLoss, const Logger& logger);
+    const Logger& logger);
 
 /// @brief Process measurements and fill the aMatrix and bVector
 ///
@@ -511,6 +512,7 @@ void addMeasurementToGx2fSumsBackend(
 template <std::size_t kMeasDim, typename track_state_t>
 void addMeasurementToGx2fSums(Gx2fSystem& extendedSystem,
                               const std::vector<BoundMatrix>& jacobianFromStart,
+                              const std::vector<std::size_t>& materialIndices,
                               const track_state_t& trackState,
                               const Logger& logger) {
   const SquareMatrix<kMeasDim> covarianceMeasurement =
@@ -525,8 +527,8 @@ void addMeasurementToGx2fSums(Gx2fSystem& extendedSystem,
       trackState.template projectorSubspaceHelper<kMeasDim>().projector();
 
   addMeasurementToGx2fSumsBackend(extendedSystem, jacobianFromStart,
-                                  covarianceMeasurement, predicted, measurement,
-                                  projector, false, logger);
+                                  materialIndices, covarianceMeasurement,
+                                  predicted, measurement, projector, logger);
 }
 
 /// @brief Convert an energy loss into the corresponding change in q/p
@@ -570,14 +572,14 @@ double computeDeltaQOverPFromEnergyLoss(
 ///        containing scattering angles and validation status
 /// @param logger A logger instance
 template <TrackProxyConcept track_proxy_t>
-void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
-                    const std::unordered_map<GeometryIdentifier,
-                                             MaterialProperties>& materialMap,
-                    std::vector<GeometryIdentifier>& geoIdVector,
-                    const Logger& logger) {
+void fillGx2fSystem(
+    const track_proxy_t track, Gx2fSystem& extendedSystem,
+    const std::unordered_map<GeometryIdentifier, Gx2fMaterialProperties>&
+        materialMap,
+    const std::vector<std::size_t>& materialParamIndices,
+    std::vector<GeometryIdentifier>& geoIdVector, const Logger& logger) {
   std::vector<BoundMatrix> jacobianFromStart;
   jacobianFromStart.emplace_back(BoundMatrix::Identity());
-  std::size_t deltaPosition{eBoundSize};
   geoIdVector.reserve(track.nTrackStates());
   for (const auto& trackState : track.trackStates()) {
     // Get and store geoId for the current surface
@@ -585,14 +587,12 @@ void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
     ACTS_DEBUG("Start to investigate trackState on surface " << geoId);
     const auto typeFlags = trackState.typeFlags();
 
-    // jacobianFromStart.emplace_back(trackState.jacobian());
-    // jacobianFromStart[0] = trackState.jacobian();
     // update all Jacobians from start
     for (auto& jac : jacobianFromStart) {
       jac = trackState.jacobian() * jac;
     }
 
-    // We only consider states with a measurement (and/or material)
+    // Skip the hole states
     if (!typeFlags.hasMeasurement() && !typeFlags.hasMaterial()) {
       ACTS_DEBUG("    Skip state.");
       continue;
@@ -615,7 +615,7 @@ void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
 
       visit_measurement(measDim, [&](auto N) {
         addMeasurementToGx2fSums<N>(extendedSystem, jacobianFromStart,
-                                    trackState, logger);
+                                    materialParamIndices, trackState, logger);
       });
     }
 
@@ -631,11 +631,13 @@ void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
       if (materialMapId->second.nDim() == 0ul) {
         continue;
       }
+      const std::size_t deltaPosition =
+          materialParamIndices.at(geoIdVector.size());
       geoIdVector.push_back(geoId);
+
       materialMapId->second.contributionToGx2fSums(
           extendedSystem, trackState.smoothed()[eBoundTheta], deltaPosition,
           logger);
-      deltaPosition += materialMapId->second.nDim();
 
       // Add for this material a new Jacobian, starting from this surface.
       jacobianFromStart.emplace_back(BoundMatrix::Identity());
@@ -662,7 +664,7 @@ Eigen::VectorXd computeGx2fDeltaParams(const Gx2fSystem& extendedSystem);
 /// @param geoIdVector Vector of geometry identifiers corresponding to material surfaces
 void updateGx2fParams(
     BoundTrackParameters& params, const Eigen::VectorXd& deltaParamsExtended,
-    std::unordered_map<GeometryIdentifier, MaterialProperties>& materialMap,
+    std::unordered_map<GeometryIdentifier, Gx2fMaterialProperties>& materialMap,
     const std::vector<GeometryIdentifier>& geoIdVector);
 
 /// @brief Calculate and update the covariance of the fitted parameters
@@ -774,8 +776,8 @@ class Gx2Fitter {
 
     /// The materialMap stores for each visited surface their scattering
     /// properties
-    std::unordered_map<GeometryIdentifier, MaterialProperties>* materialMap =
-        nullptr;
+    std::unordered_map<GeometryIdentifier, Gx2fMaterialProperties>*
+        materialMap = nullptr;
 
     /// @brief Gx2f actor operation
     ///
@@ -958,6 +960,15 @@ class Gx2Fitter {
 
       return Result<void>::success();
     }
+    ///
+    /// @tparam propagator_state_t is the type of Propagator state
+    /// @tparam stepper_t Type of the stepper
+    /// @tparam navigator_t Type of the navigator
+
+    /// @param state is the mutable propagator state object
+    /// @param stepper The stepper in use
+    /// @param navigator The navigator in use
+    /// @param result is the mutable result state object
 
     template <typename propagator_state_t, typename stepper_t,
               typename navigator_t>
@@ -987,7 +998,8 @@ class Gx2Fitter {
       /// Entry is already present. Nothing to be done
       if (materialMapId != materialMap->end()) {
         ACTS_VERBOSE("   ....  entry is already in the material map.");
-        result.materialParamIdx += materialMapId->second.nDim();
+        result.materialParamIndices.push_back(
+            result.materialParamIndices.back() + materialMapId->second.nDim());
         return Result<void>::success();
       }
 
@@ -1007,8 +1019,8 @@ class Gx2Fitter {
       const MaterialSlab& slab = *slabResult;
       const bool goodSlab = !slab.isVacuum();
 
-      MaterialProperties::ELossAtSurface eLoss{};
-      MaterialProperties::ScatteringAtSurface scatterer{};
+      Gx2fMaterialProperties::ELossAtSurface eLoss{};
+      Gx2fMaterialProperties::ScatteringAtSurface scatterer{};
 
       if (goodSlab) {
         const auto& particle = parametersWithHypothesis->particleHypothesis();
@@ -1021,7 +1033,7 @@ class Gx2Fitter {
                 particle.absoluteCharge()));
         ACTS_VERBOSE("        The Highland formula gives sigma = " << sigma);
 
-        scatterer = MaterialProperties::ScatteringAtSurface{sigma};
+        scatterer = Gx2fMaterialProperties::ScatteringAtSurface{sigma};
 
       } else {
         ACTS_VERBOSE("        Material slab is not valid.");
@@ -1038,7 +1050,7 @@ class Gx2Fitter {
         if (!eLoss.isValid() && goodSlab) {
           const auto& particle = parametersWithHypothesis->particleHypothesis();
 
-          eLoss = MaterialProperties::ELossAtSurface{
+          eLoss = Gx2fMaterialProperties::ELossAtSurface{
               computeEnergyLossMean(
                   slab, particle.absolutePdg(), particle.mass(),
                   parametersWithHypothesis->parameters()[eBoundQOverP],
@@ -1053,10 +1065,11 @@ class Gx2Fitter {
       }
       materialMapId =
           materialMap
-              ->emplace(geoId, MaterialProperties{std::move(scatterer),
-                                                  std::move(eLoss)})
+              ->emplace(geoId, Gx2fMaterialProperties{std::move(scatterer),
+                                                      std::move(eLoss)})
               .first;
-      result.materialParamIdx += materialMapId->second.nDim();
+      result.materialParamIndices.push_back(result.materialParamIndices.back() +
+                                            materialMapId->second.nDim());
 
       return Result<void>::success();
     }
@@ -1138,7 +1151,7 @@ class Gx2Fitter {
 
     // The materialMap stores for each visited surface their scattering
     // properties
-    std::unordered_map<GeometryIdentifier, MaterialProperties> materialMap;
+    std::unordered_map<GeometryIdentifier, Gx2fMaterialProperties> materialMap;
 
     // This will be filled during the updates with the final covariance of the
     // track parameters.
@@ -1228,7 +1241,7 @@ class Gx2Fitter {
 
       // System that we fill with the information gathered by the actor and
       // evaluate later
-      Gx2fSystem extendedSystem{gx2fResult.materialParamIdx};
+      Gx2fSystem extendedSystem{gx2fResult.materialParamIndices.back()};
 
       // This vector stores the IDs for each visited material in order. We use
       // it later for updating the scattering angles. We cannot use
@@ -1236,7 +1249,8 @@ class Gx2Fitter {
       // all stored material in each propagation.
       std::vector<GeometryIdentifier> geoIdVector;
 
-      fillGx2fSystem(track, extendedSystem, materialMap, geoIdVector,
+      fillGx2fSystem(track, extendedSystem, materialMap,
+                     gx2fResult.materialParamIndices, geoIdVector,
                      *m_addToSumLogger);
 
       chi2sum = extendedSystem.chi2();
@@ -1387,7 +1401,7 @@ class Gx2Fitter {
 
       // System that we fill with the information gathered by the actor and
       // evaluate later
-      Gx2fSystem extendedSystem{gx2fResult.materialParamIdx};
+      Gx2fSystem extendedSystem{gx2fResult.materialParamIndices.back()};
 
       // This vector stores the IDs for each visited material in order. We use
       // it later for updating the scattering angles. We cannot use
@@ -1395,7 +1409,8 @@ class Gx2Fitter {
       // all stored material in each propagation.
       std::vector<GeometryIdentifier> geoIdVector;
 
-      fillGx2fSystem(track, extendedSystem, materialMap, geoIdVector,
+      fillGx2fSystem(track, extendedSystem, materialMap,
+                     gx2fResult.materialParamIndices, geoIdVector,
                      *m_addToSumLogger);
 
       chi2sum = extendedSystem.chi2();
