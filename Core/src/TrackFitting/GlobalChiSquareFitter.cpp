@@ -30,7 +30,7 @@ void MaterialProperties::updateTrackParameters(
     trackPars.parameters()[eBoundPhi] += deltaPhi();
     trackPars.parameters()[eBoundTheta] += deltaTheta();
   }
-  if (m_eloss.isValid()) {
+  if (false && m_eloss.isValid()) {
     const ParticleHypothesis& hypot = trackPars.particleHypothesis();
     trackPars.parameters()[eBoundQOverP] = hypot.qOverP(
         trackPars.absoluteMomentum() - m_lostEnergy, trackPars.charge());
@@ -56,22 +56,22 @@ void MaterialProperties::contributionToGx2fSums(Gx2fSystem& extendedSystem,
     extendedSystem.bVector()(stateIdx + 1, 0) -= invCovTheta * deltaTheta();
     extendedSystem.chi2() += invCovTheta * Acts::square(deltaTheta());
     ACTS_INFO("Scattering contributions in contributionToGx2fSums:\n"
-                 << "    invCov:        " << invCovPhi << "\n"
-                 << "    sinThetaLoc:   " << sinThetaLoc << "\n"
-                 << "    Phi:\n"
-                 << "        scattering angle:     " << deltaPhi() << "\n"
-                 << "        aMatrix contribution: " << invCovPhi << "\n"
-                 << "        bVector contribution: " << invCovPhi * deltaPhi()
-                 << "\n"
-                 << "        chi2sum contribution: "
-                 << invCovPhi * Acts::square(deltaPhi()) << "\n"
-                 << "    Theta:\n"
-                 << "        scattering angle:     " << deltaTheta() << "\n"
-                 << "        aMatrix contribution: " << invCovTheta << "\n"
-                 << "        bVector contribution: "
-                 << invCovTheta * deltaTheta() << "\n"
-                 << "        chi2sum contribution: "
-                 << invCovTheta * Acts::square(deltaTheta()));
+              << "    invCov:        " << invCovPhi << "\n"
+              << "    sinThetaLoc:   " << sinThetaLoc << "\n"
+              << "    Phi:\n"
+              << "        scattering angle:     " << deltaPhi() << "\n"
+              << "        aMatrix contribution: " << invCovPhi << "\n"
+              << "        bVector contribution: " << invCovPhi * deltaPhi()
+              << "\n"
+              << "        chi2sum contribution: "
+              << invCovPhi * Acts::square(deltaPhi()) << "\n"
+              << "    Theta:\n"
+              << "        scattering angle:     " << deltaTheta() << "\n"
+              << "        aMatrix contribution: " << invCovTheta << "\n"
+              << "        bVector contribution: " << invCovTheta * deltaTheta()
+              << "\n"
+              << "        chi2sum contribution: "
+              << invCovTheta * Acts::square(deltaTheta()));
   }
 
   if (m_eloss.isValid()) {
@@ -131,7 +131,7 @@ void addMeasurementToGx2fSumsBackend(
     ACTS_VERBOSE("    covarianceMeasurement:\n" << covarianceMeasurement);
     return;
   }
-  ACTS_INFO("DIE CASSY "<<jacobianFromStart.size());
+  ACTS_INFO("DIE CASSY " << jacobianFromStart.size());
   // Create an extended Jacobian. This one contains only eBoundSize rows,
   // because the rest is irrelevant. We fill it in the next steps.
   // TODO make dimsExtendedParams template with unrolling

@@ -585,7 +585,6 @@ void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
     ACTS_DEBUG("Start to investigate trackState on surface " << geoId);
     const auto typeFlags = trackState.typeFlags();
 
-
     // jacobianFromStart.emplace_back(trackState.jacobian());
     // jacobianFromStart[0] = trackState.jacobian();
     // update all Jacobians from start
@@ -593,7 +592,7 @@ void fillGx2fSystem(const track_proxy_t track, Gx2fSystem& extendedSystem,
       jac = trackState.jacobian() * jac;
     }
 
-        // We only consider states with a measurement (and/or material)
+    // We only consider states with a measurement (and/or material)
     if (!typeFlags.hasMeasurement() && !typeFlags.hasMaterial()) {
       ACTS_DEBUG("    Skip state.");
       continue;
@@ -824,8 +823,8 @@ class Gx2Fitter {
       ++result.surfaceCount;
       const GeometryIdentifier geoId = surface->geometryId();
       ACTS_DEBUG("Surface "
-                 << surface->toStream(state.geoContext) << " detected. "
-                 << " Is sensitive: " << (surface->isSensitive() ? "yes" : "no")
+                 << geoId << ", " << surface->bounds() << " detected. "
+                 << "Sensitive: " << (surface->isSensitive() ? "yes" : "no")
                  << ", has material: "
                  << (surface->hasMaterial() ? "yes" : "no"));
 
@@ -878,8 +877,9 @@ class Gx2Fitter {
       auto materialItr = materialMap->find(geoId);
       const bool isSensitive =
           surface->isSensitive() || sourceLinkIt != inputMeasurements->end();
-      const bool hasMaterial =
-          surface->hasMaterial() && materialItr!= materialMap->end() && materialItr->second.materialIsValid();
+      const bool hasMaterial = surface->hasMaterial() &&
+                               materialItr != materialMap->end() &&
+                               materialItr->second.materialIsValid();
       /// The surface is neither sensitive or it carries material
       if (!isSensitive && !hasMaterial) {
         return Result<void>::success();
@@ -925,17 +925,17 @@ class Gx2Fitter {
         // track
         ACTS_DEBUG("    Update parameters with material effects.");
         ACTS_VERBOSE("        boundParams before the update: "
-                     << trackStateProxy.smoothed().transpose());
+                     << boundParams.parameters().transpose());
 
         materialItr->second.updateTrackParameters(boundParams);
-        ACTS_VERBOSE("        boundParams before the update: "
-                     << trackStateProxy.smoothed().transpose());
+        ACTS_VERBOSE("        boundParams after the update: "
+                     << boundParams.parameters().transpose());
 
         stepper.update(state.stepping,
                        transformBoundToFreeParameters(
                            trackStateProxy.referenceSurface(), state.geoContext,
-                           trackStateProxy.smoothed()),
-                       trackStateProxy.smoothed(),
+                           boundParams.parameters()),
+                       boundParams.parameters(),
                        trackStateProxy.smoothedCovariance(), *surface);
       }
 
