@@ -531,32 +531,6 @@ void addMeasurementToGx2fSums(Gx2fSystem& extendedSystem,
                                   predicted, measurement, projector, logger);
 }
 
-/// @brief Convert an energy loss into the corresponding change in q/p
-///
-/// Applies an energy loss to the particle's energy and returns the resulting
-/// offset in the bound parameter q/p. This mirrors the update that
-/// @c PointwiseMaterialInteraction performs during propagation, and is used to
-/// obtain the parametrized q/p offset for a material surface.
-///
-/// @param slab The material slab traversed
-/// @param eLoss The energy loss, as a positive quantity
-/// @param particleHypothesis The particle hypothesis (mass, charge, PDG)
-/// @param qOverP The q/p of the track before traversing the material
-/// @param direction Propagation direction; energy decreases in the forward
-///        direction and increases in the backward direction
-///
-/// @return The offset @f$ \Delta(q/p) @f$ to be added to @p qOverP. Returns 0
-///         for vacuum, for a fixed momentum hypothesis, and for neutral
-///         particles, for which the material functions are undefined.
-///
-/// @note The particle is placed at rest if the loss exceeds its kinetic
-///       energy, and the resulting momentum is clipped from below at 10 MeV to
-///       avoid pushing tracks to arbitrarily small momenta.
-double computeDeltaQOverPFromEnergyLoss(
-    const MaterialSlab& slab, double eLoss,
-    const ParticleHypothesis& particleHypothesis, double qOverP,
-    Direction direction);
-
 /// @brief Fill the GX2F system with data from a track
 ///
 /// This function processes a track proxy and updates the aMatrix, bVector, and
