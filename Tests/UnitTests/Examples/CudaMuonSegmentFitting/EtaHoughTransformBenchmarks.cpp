@@ -1353,6 +1353,7 @@ void runEtaValidation(EtaValidationBatch& batch,
   }
 
   CudaHT::CudaHoughPlaneBatch plane{{nBinsX, nBinsY}, nBuckets};
+  ActsExamples::CudaStream stream;
   std::cout << "Running " << validationName << " with " << plane.nBinsX()
             << " x " << plane.nBinsY() << " bins for " << nBuckets
             << " buckets using the " << peakFinderName << " peak finder"
@@ -1368,8 +1369,8 @@ void runEtaValidation(EtaValidationBatch& batch,
     const auto uploadStart = BenchmarkClock::now();
     {
       Acts::ScopedTimer uploadTimer{"CUDA Eta host-to-device", *timerLogger};
-      batch.spacePoints.moveToDevice();
-      plane.moveToDevice();
+      batch.spacePoints.moveToDevice(stream.get());
+      plane.moveToDevice(stream.get());
     }
     uploadSeconds = elapsedSeconds(uploadStart, BenchmarkClock::now());
 
@@ -1379,16 +1380,19 @@ void runEtaValidation(EtaValidationBatch& batch,
       if (peakFinderName == "sliding-window") {
         return CudaHT::EtaHoughTransform::etaHoughTransform<
             maximumCapacityPerBucket, CudaHT::PeakFinder::SlidingWindow>(
-            plane, batch.spacePoints, axisRanges);
+            plane, batch.spacePoints, axisRanges,
+            ActsExamples::YieldType{1.0}, 128u, 0u, stream.get());
       }
       if (peakFinderName == "relative-nms") {
         return CudaHT::EtaHoughTransform::etaHoughTransform<
             maximumCapacityPerBucket, CudaHT::PeakFinder::RelativeNms>(
-            plane, batch.spacePoints, axisRanges);
+            plane, batch.spacePoints, axisRanges,
+            ActsExamples::YieldType{1.0}, 128u, 0u, stream.get());
       }
       return CudaHT::EtaHoughTransform::etaHoughTransform<
           maximumCapacityPerBucket, CudaHT::PeakFinder::GlobalMaximum>(
-          plane, batch.spacePoints, axisRanges);
+          plane, batch.spacePoints, axisRanges,
+          ActsExamples::YieldType{1.0}, 128u, 0u, stream.get());
     }();
     processingSeconds =
         elapsedSeconds(processingStart, BenchmarkClock::now());
@@ -1396,8 +1400,8 @@ void runEtaValidation(EtaValidationBatch& batch,
     const auto downloadStart = BenchmarkClock::now();
     {
       Acts::ScopedTimer downloadTimer{"CUDA Eta device-to-host", *timerLogger};
-      result.moveToHost();
-      result.copyAssociatedHitIndicesToHost();
+      result.moveToHost(stream.get());
+      result.copyAssociatedHitIndicesToHost(stream.get());
     }
     downloadSeconds = elapsedSeconds(downloadStart, BenchmarkClock::now());
 

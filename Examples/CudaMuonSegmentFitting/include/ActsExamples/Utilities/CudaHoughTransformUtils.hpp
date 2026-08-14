@@ -30,8 +30,8 @@ enum class PeakFinder : std::uint8_t {
   RelativeNms,
 };
 
-/// @brief Bit mask encoding which logical detector layers contributed to one Hough
-/// cell.
+/// @brief Bit mask encoding the logical detector layers contributing to a
+/// Hough cell.
 ///
 /// One bit corresponds to one zero-based logical layer:
 ///
@@ -44,15 +44,15 @@ using LayerMask = unsigned long long;
 /// Per-cell accumulators are transient shared memory owned by the fill kernel.
 /// Only the dynamic Y-axis range of each bucket persists in global memory.
 struct CudaHoughPlaneBatchArrays {
-  /// Dynamic axis ranges in y-intercept - one of each for each bucket
+  /// Dynamic y-intercept range for every bucket.
   CoordType* yMin = nullptr;
   CoordType* yMax = nullptr;
 
-  // This is kept as X, Y to be compliant with original HoughTransformUtils
-  // and to later support generalization of this algorithm to also support phi
+  /// Dimensions use the X/Y convention of HoughTransformUtils. For the Eta
+  /// transform they represent tanBeta and y-intercept respectively.
   std::uint32_t nBuckets = 0;
-  std::uint32_t nBinsX = 0;  // nBinsX is in our case tanTheta
-  std::uint32_t nBinsY = 0;  // nBinsY is y intercept
+  std::uint32_t nBinsX = 0;
+  std::uint32_t nBinsY = 0;
 };
 
 /// @brief Event-level CUDA Hough-plane metadata.
@@ -66,11 +66,11 @@ class CudaHoughPlaneBatch {
 
   CudaHoughPlaneBatch(const HoughPlaneConfig& cfg, size_type nBuckets);
 
-  /// Device memory is owned, so no copy
+  /// Device memory is owned, so instances are not copyable.
   CudaHoughPlaneBatch(const CudaHoughPlaneBatch&) = delete;
   CudaHoughPlaneBatch& operator=(const CudaHoughPlaneBatch&) = delete;
 
-  // Move allowed
+  /// Transfer ownership without copying device memory.
   CudaHoughPlaneBatch(CudaHoughPlaneBatch&& other) noexcept;
   CudaHoughPlaneBatch& operator=(CudaHoughPlaneBatch&& other) noexcept;
 
@@ -82,15 +82,9 @@ class CudaHoughPlaneBatch {
   size_type nCellsPerBucket() const noexcept { return nBinsX() * nBinsY(); }
   bool empty() const noexcept { return nBuckets() == 0; }
 
-  /// @brief Allocate device arrays and copy axis ranges to the device.
-  void moveToDevice();
-  /// @brief Allocate device arrays and copy axis ranges using pinned staging
-  /// memory on the supplied CUDA stream.
+  /// @brief Allocate device axis-range arrays for use on a CUDA stream.
   void moveToDevice(cudaStream_t stream);
-  /// @brief Copy dynamic axis ranges back to the host.
-  void moveToHost();
-  /// @brief Copy dynamic axis ranges using pinned staging memory on the
-  /// supplied CUDA stream.
+  /// @brief Copy dynamic axis ranges on a CUDA stream.
   void moveToHost(cudaStream_t stream);
   /// @brief Free device axis-range arrays.
   void clearDevice() noexcept;

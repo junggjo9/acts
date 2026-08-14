@@ -44,8 +44,9 @@ void fillEtaHitAssociationsImpl(CudaHoughPlaneBatch& plane,
 /// every maximum.
 ///
 /// The returned maximum batch remains allocated on the device. Call
-/// moveToHost() and copyAssociatedHitIndicesToHost() when CPU access is
-/// required. Supplying a stream confines all synchronization to that stream.
+/// moveToHost(stream) and copyAssociatedHitIndicesToHost(stream) when CPU
+/// access is required. Supplying a stream confines all synchronization to that
+/// stream.
 /// A non-zero numBlocks limits all bucket/maximum processing grids, allowing
 /// several event streams to share the device. Zero preserves the default
 /// launch sizes.
@@ -57,11 +58,7 @@ CudaHoughMaximumBatch<MaximaPerBucket> etaHoughTransform(
     std::uint32_t threadsPerBlock = 128u, std::uint32_t numBlocks = 0u,
     cudaStream_t stream = nullptr) {
   CudaHoughMaximumBatch<MaximaPerBucket> maxima{plane.nBuckets()};
-  if (stream == nullptr) {
-    maxima.moveToDevice();
-  } else {
-    maxima.moveToDevice(stream);
-  }
+  maxima.moveToDevice(stream);
 
   // 1. Fill the Hough planes, find maxima and count their associated hits.
   detail::etaHoughTransformImpl(plane, spacePoints, maxima.deviceArrays(),
@@ -69,18 +66,10 @@ CudaHoughMaximumBatch<MaximaPerBucket> etaHoughTransform(
                                 peakFinder, stream);
 
   // 2. Copy only nMaxima and nAssociatedHits to the CPU.
-  if (stream == nullptr) {
-    maxima.copyAssociationMetadataToHost();
-  } else {
-    maxima.copyAssociationMetadataToHost(stream);
-  }
+  maxima.copyAssociationMetadataToHost(stream);
 
   // 3. Calculate CSR offsets and allocate the exact index storage.
-  if (stream == nullptr) {
-    maxima.allocateAssociationStorage();
-  } else {
-    maxima.allocateAssociationStorage(stream);
-  }
+  maxima.allocateAssociationStorage(stream);
 
   // 4. Fill the newly allocated index array.
   detail::fillEtaHitAssociationsImpl(plane, spacePoints, maxima.deviceArrays(),

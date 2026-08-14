@@ -8,11 +8,10 @@
 
 #pragma once
 
-#include "ActsExamples/Utilities/CudaHoughTransformUtils.hpp"
+#include "Acts/Seeding/HoughTransformUtils.hpp"
 
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <span>
 #include <vector>
 
@@ -44,36 +43,24 @@ struct CudaHoughMaximumBatchArrays {
   /// Number of occupied maximum slots in each bucket.
   std::uint32_t* nMaxima = nullptr;
 
-  // Numbere of input space points associated with maximum
+  /// Number of input space points associated with each maximum.
   std::uint32_t* nAssociatedHits = nullptr;
 
-  // Offsets into into associatedHitIndices
+  /// CSR offsets into associatedHitIndices.
   std::uint32_t* associatedHitOffsets = nullptr;
 
-  // Flat list of indices to CudaMuonSpacePointContainer
+  /// Flat list of indices into CudaMuonSpacePointContainer.
   std::uint32_t* associatedHitIndices = nullptr;
 
   std::uint32_t nBuckets = 0;
   std::uint32_t capacityPerBucket = 0;
-  // Full size of associated hit list
+  /// Full size of the associated-hit list.
   std::uint32_t totalAssociatedHits = 0;
 
   /// Return the flat array index for a bucket and maximum slot.
   __host__ __device__ std::uint32_t index(
       std::uint32_t bucket, std::uint32_t maximum) const noexcept {
     return bucket * capacityPerBucket + maximum;
-  }
-
-  /// Return the beginning of the associated-hit range for a maximum.
-  __host__ __device__ std::uint32_t associatedHitBegin(
-      std::uint32_t bucket, std::uint32_t maximum) const noexcept {
-    return associatedHitOffsets[index(bucket, maximum)];
-  }
-
-  /// Return the end of the associated-hit range for a maximum.
-  __host__ __device__ std::uint32_t associatedHitEnd(
-      std::uint32_t bucket, std::uint32_t maximum) const noexcept {
-    return associatedHitOffsets[index(bucket, maximum) + 1u];
   }
 };
 
@@ -89,18 +76,18 @@ class CudaHoughMaximumBatch {
   static_assert(MaximaPerBucket > 0,
                 "MaximaPerBucket must be greater than zero");
 
-  static_assert(MaximaPerBucket <= std::numeric_limits<std::uint32_t>::max(),
-                "MaximaPerBucket must fit into std::uint32_t");
+  static_assert(MaximaPerBucket <= 64,
+                "MaximaPerBucket will never in real data exceed 64");
 
   using size_type = std::size_t;
 
   explicit CudaHoughMaximumBatch(size_type nBuckets);
 
+  /// Copy creates problem with cuda memory ownership
   CudaHoughMaximumBatch(const CudaHoughMaximumBatch&) = delete;
   CudaHoughMaximumBatch& operator=(const CudaHoughMaximumBatch&) = delete;
 
   CudaHoughMaximumBatch(CudaHoughMaximumBatch&& other) noexcept;
-
   CudaHoughMaximumBatch& operator=(CudaHoughMaximumBatch&& other) noexcept;
 
   ~CudaHoughMaximumBatch() noexcept;
@@ -134,18 +121,15 @@ class CudaHoughMaximumBatch {
   /// Copy only the metadata required to allocate hit-association storage.
   ///
   /// Copies nMaxima and nAssociatedHits from the device.
-  void copyAssociationMetadataToHost();
   void copyAssociationMetadataToHost(cudaStream_t stream);
 
   /// Calculate CSR offsets from the copied association counts and allocate
   /// exact associated-hit storage on the device.
-  void allocateAssociationStorage();
   void allocateAssociationStorage(cudaStream_t stream);
 
   /// Copy the associated space-point indices from the device to the host.
   ///
   /// This is called after the association-fill kernel has completed.
-  void copyAssociatedHitIndicesToHost();
   void copyAssociatedHitIndicesToHost(cudaStream_t stream);
 
   /// Return the number of associated input space points for one maximum.
@@ -164,12 +148,10 @@ class CudaHoughMaximumBatch {
     return m_associationStorageAllocated;
   }
 
-  /// Allocate device storage and copy host data to it.
-  void moveToDevice();
+  /// Allocate device output storage for use on the supplied stream.
   void moveToDevice(cudaStream_t stream);
 
   /// Copy device data back into host storage.
-  void moveToHost();
   void moveToHost(cudaStream_t stream);
 
   /// Reset the per-bucket maximum counters on the device.

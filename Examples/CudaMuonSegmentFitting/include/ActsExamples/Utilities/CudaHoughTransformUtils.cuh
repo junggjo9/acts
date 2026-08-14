@@ -37,11 +37,6 @@ __device__ __host__ inline LayerMask layerBit(unsigned layer) {
   return LayerMask{1ull} << layer;
 }
 
-// Return true if bit is not already in oldMask
-__device__ inline bool notInMask(const LayerMask oldMask, const LayerMask bit) {
-  return (oldMask & bit) == LayerMask{0ull};
-}
-
 /// Device mirrors of Acts:HoughTransformUtils bin helpers
 /// convenience functions to link bin indices to axis coordinates
 
@@ -124,7 +119,6 @@ __device__ inline void fillSharedBin(YieldType* sharedHits,
   // Get layer as bit mask
   const LayerMask bit = layerBit(layer);
 
-  // Check for error
   if (bit == LayerMask{0ull}) {
     return;
   }
@@ -133,7 +127,7 @@ __device__ inline void fillSharedBin(YieldType* sharedHits,
   const LayerMask oldMask = atomicOr(&sharedLayerMask[localBin], bit);
 
   // If bit was not in mask, add 1 (weight) to number of layers
-  if (notInMask(oldMask, bit)) {
+  if ((oldMask & bit) == LayerMask{0ull}) {
     atomicAdd(&sharedLayers[localBin], weight);
   }
 }
@@ -240,7 +234,7 @@ struct RelativeNmsConfig {
   YieldType minimumYSpacingFraction = 0.10f;
 };
 
-// Struct for GlobalMaximum Algorithm
+/// Accumulator yield and location used by the global-maximum finder.
 struct GlobalMaximumCandidate {
   YieldType nHits = -std::numeric_limits<YieldType>::infinity();
 
@@ -257,20 +251,14 @@ struct RankedPeakCandidate {
   std::uint32_t localBin = std::numeric_limits<std::uint32_t>::max();
 };
 
-// @brief Check if better
-// @param candidate To compare
-// @param current Current best
 __device__ inline bool betterCandidate(const GlobalMaximumCandidate& candidate,
                                        const GlobalMaximumCandidate& current) {
-  if (candidate.nHits > current.nHits) {
-    return true;
-  }
-
-  return candidate.nHits == current.nHits &&
-         candidate.localBin < current.localBin;
+  return candidate.nHits > current.nHits ||
+         (candidate.nHits == current.nHits &&
+          candidate.localBin < current.localBin);
 }
 
-__device__ inline bool betterRankedPeakCandidate(
+__device__ inline bool betterCandidate(
     const RankedPeakCandidate& candidate, const RankedPeakCandidate& current) {
   if (candidate.nLayers != current.nLayers) {
     return candidate.nLayers > current.nLayers;
@@ -284,13 +272,38 @@ __device__ inline bool betterRankedPeakCandidate(
   return candidate.localBin < current.localBin;
 }
 
+/// Reduce one candidate per thread to a deterministic block-wide best value.
+template <typename Candidate>
+__device__ inline Candidate reduceBestCandidate(
+    Candidate localBest, Candidate* sharedCandidates) {
+  sharedCandidates[threadIdx.x] = localBest;
+  __syncthreads();
+
+  // This general reduction also supports non-power-of-two block sizes.
+  for (std::uint32_t active = blockDim.x; active > 1u;) {
+    const std::uint32_t nextActive = (active + 1u) / 2u;
+    if (threadIdx.x < nextActive) {
+      const std::uint32_t partner = threadIdx.x + nextActive;
+      if (partner < active && betterCandidate(
+                                  sharedCandidates[partner],
+                                  sharedCandidates[threadIdx.x])) {
+        sharedCandidates[threadIdx.x] = sharedCandidates[partner];
+      }
+    }
+    __syncthreads();
+    active = nextActive;
+  }
+
+  return sharedCandidates[0];
+}
+
 /// Every thread in the block must call this function.
 ///
 /// sharedCandidates must contain at least blockDim.x entries.
 __device__ inline GlobalMaximumCandidate findGlobalMaximum(
     const YieldType* sharedHits, std::uint32_t nCells,
     GlobalMaximumCandidate* sharedCandidates) {
-  // 1. Preprocess cells so there is one maximum per thread: 225->128
+  // First reduce the cells assigned to each thread locally.
   GlobalMaximumCandidate localMaximum{};
 
   for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
@@ -302,29 +315,7 @@ __device__ inline GlobalMaximumCandidate findGlobalMaximum(
     }
   }
 
-  // 2. Each thread has one maximum
-  sharedCandidates[threadIdx.x] = localMaximum;
-  __syncthreads();
-
-  // 3. Shared-memory block reduction in general form
-  // Works for both power-of-two and non-power-of-two block sizes.
-  for (std::uint32_t active = blockDim.x; active > 1u;) {
-    const std::uint32_t nextActive = (active + 1u) / 2u;
-
-    if (threadIdx.x < nextActive) {
-      const std::uint32_t partner = threadIdx.x + nextActive;
-
-      if (partner < active && betterCandidate(sharedCandidates[partner],
-                                              sharedCandidates[threadIdx.x])) {
-        sharedCandidates[threadIdx.x] = sharedCandidates[partner];
-      }
-    }
-
-    __syncthreads();
-    active = nextActive;
-  }
-
-  return sharedCandidates[0];
+  return reduceBestCandidate(localMaximum, sharedCandidates);
 }
 
 /// Mark all cells accepted by the sliding-window peak finder.
@@ -541,29 +532,12 @@ __device__ inline RankedPeakCandidate findBestMarkedPeak(
     const RankedPeakCandidate candidate{
         sharedLayers[localBin], sharedAssociatedHits[localBin],
         sharedHits[localBin], localBin};
-    if (betterRankedPeakCandidate(candidate, localBest)) {
+    if (betterCandidate(candidate, localBest)) {
       localBest = candidate;
     }
   }
 
-  sharedCandidates[threadIdx.x] = localBest;
-  __syncthreads();
-
-  for (std::uint32_t active = blockDim.x; active > 1u;) {
-    const std::uint32_t nextActive = (active + 1u) / 2u;
-    if (threadIdx.x < nextActive) {
-      const std::uint32_t partner = threadIdx.x + nextActive;
-      if (partner < active && betterRankedPeakCandidate(
-                                  sharedCandidates[partner],
-                                  sharedCandidates[threadIdx.x])) {
-        sharedCandidates[threadIdx.x] = sharedCandidates[partner];
-      }
-    }
-    __syncthreads();
-    active = nextActive;
-  }
-
-  return sharedCandidates[0];
+  return reduceBestCandidate(localBest, sharedCandidates);
 }
 
 /// Recenter one sliding-window peak using the same weighted-average rule as
@@ -612,20 +586,17 @@ __device__ inline std::uint32_t slidingWindowRecenter(
   return yBin * nBinsX + xBin;
 }
 
-/// @brief Atomically reserve one maximum slot in global memory
-/// @note Avoids going over preallocated limit
+/// @brief Atomically reserve one preallocated maximum slot.
 __device__ inline std::uint32_t reserveMaximumSlot(
     CudaHoughMaximumBatchArrays maxima, std::uint32_t bucket) {
   std::uint32_t* counter = &maxima.nMaxima[bucket];
 
-  // Just atomic read value of counter
+  // Read without changing the counter.
   std::uint32_t current = atomicCAS(counter, 0u, 0u);
 
   while (current < maxima.capacityPerBucket) {
-    // Attempt to reserve
     const std::uint32_t observed = atomicCAS(counter, current, current + 1u);
 
-    // If counter was equal current it is reserved
     if (observed == current) {
       return current;
     }
@@ -636,19 +607,8 @@ __device__ inline std::uint32_t reserveMaximumSlot(
   return maxima.capacityPerBucket;
 }
 
-/// @brief If possible, add Eta maximum to HoughMaximum batch
-/// @param maxima: ptr to preallocated SoA of maximums
-/// @param plane: ptr to global SoA of plane
-/// @param ranges: range of bucket
-/// @param sharedLayers: ptr to shared mem of Layers
-/// @param sharedLayerMask: ptr to shared mem of Layers bit Mask
-/// @param sharedAssociatedHits: ptr to shared mem of unique hit counts
-/// @param bucket: bucket idx
-/// @param candidate: Hough Maximum object to append
-///
-/// @note Operation can fail (return false) if bucket has no more
-/// places for maximums -> number of maximums per bucket is
-/// preallocated before the operation
+/// @brief Append an Eta maximum if the bucket still has a free slot.
+/// @return Whether the candidate was stored.
 __device__ inline bool appendEtaMaximum(
     CudaHoughMaximumBatchArrays maxima, const CudaHoughPlaneBatchArrays plane,
     const HoughAxisRanges ranges, const YieldType* sharedLayers,
@@ -695,8 +655,7 @@ __device__ inline bool appendEtaMaximum(
 
 namespace ActsExamples::CudaHoughTransformUtils::detail {
 
-/// @brief Helper to get required number of shared Bytes
-/// for whoel Eta operation
+/// Return the dynamic shared-memory size required by the Eta kernel.
 inline std::size_t sharedBytesForEtaHough(std::size_t nCells,
                                           std::size_t threadsPerBlock,
                                           PeakFinder peakFinder) {
@@ -711,9 +670,6 @@ inline std::size_t sharedBytesForEtaHough(std::size_t nCells,
 
   if (peakFinder != PeakFinder::GlobalMaximum) {
     bytes += nCells * sizeof(std::uint8_t);
-  }
-
-  if (peakFinder != PeakFinder::GlobalMaximum) {
     bytes = alignUp(bytes, alignof(PeakFinders::RankedPeakCandidate));
     bytes += threadsPerBlock * sizeof(PeakFinders::RankedPeakCandidate);
   } else {

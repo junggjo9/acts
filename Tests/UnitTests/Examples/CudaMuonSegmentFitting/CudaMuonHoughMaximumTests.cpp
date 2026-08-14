@@ -9,6 +9,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include "ActsExamples/EventData/CudaMuonHoughMaximum.hpp"
+#include "ActsExamples/Utilities/CudaUtilities.hpp"
 
 #include <array>
 #include <cstdint>
@@ -43,12 +44,11 @@ BOOST_AUTO_TEST_CASE(CudaMuonHoughMaximumHostConstruction) {
 }
 
 BOOST_AUTO_TEST_CASE(CudaMuonHoughMaximumExactAssociationStorage) {
-  int deviceCount = 0;
-
   using MaximumBatch = ActsExamples::CudaHoughMaximumBatch<2u>;
 
   MaximumBatch maxima{3u};
-  maxima.moveToDevice();
+  ActsExamples::CudaStream stream;
+  maxima.moveToDevice(stream.get());
 
   BOOST_REQUIRE(maxima.isOnDevice());
 
@@ -86,7 +86,7 @@ BOOST_AUTO_TEST_CASE(CudaMuonHoughMaximumExactAssociationStorage) {
                       cudaSuccess);
 
   // Only nMaxima and nAssociatedHits are copied here.
-  maxima.copyAssociationMetadataToHost();
+  maxima.copyAssociationMetadataToHost(stream.get());
 
   BOOST_CHECK_EQUAL(maxima.nMaxima(0u), 2u);
   BOOST_CHECK_EQUAL(maxima.nMaxima(1u), 1u);
@@ -99,7 +99,7 @@ BOOST_AUTO_TEST_CASE(CudaMuonHoughMaximumExactAssociationStorage) {
   // tanBeta was deliberately not copied by the metadata-only transfer.
   BOOST_CHECK_EQUAL(maxima.tanBeta(0u, 0u), 0.0);
 
-  maxima.allocateAssociationStorage();
+  maxima.allocateAssociationStorage(stream.get());
 
   BOOST_REQUIRE(maxima.hasAssociationStorage());
   BOOST_CHECK_EQUAL(maxima.totalAssociatedHits(), 6u);
@@ -130,7 +130,7 @@ BOOST_AUTO_TEST_CASE(CudaMuonHoughMaximumExactAssociationStorage) {
                  sizeof(associatedIndices), cudaMemcpyHostToDevice),
       cudaSuccess);
 
-  maxima.copyAssociatedHitIndicesToHost();
+  maxima.copyAssociatedHitIndicesToHost(stream.get());
 
   const std::array<std::uint32_t, 3u> expectedFirst{10u, 11u, 12u};
   const std::array<std::uint32_t, 1u> expectedSecond{20u};
@@ -149,8 +149,8 @@ BOOST_AUTO_TEST_CASE(CudaMuonHoughMaximumExactAssociationStorage) {
   BOOST_CHECK_EQUAL_COLLECTIONS(third.begin(), third.end(),
                                 expectedThird.begin(), expectedThird.end());
 
-  // The ordinary maximum values are copied only by moveToHost().
-  maxima.moveToHost();
+  // The ordinary maximum values are copied only by moveToHost(stream).
+  maxima.moveToHost(stream.get());
 
   BOOST_CHECK_EQUAL(maxima.tanBeta(0u, 0u), 42.0);
   BOOST_CHECK_EQUAL(maxima.tanBeta(0u, 1u), 43.0);

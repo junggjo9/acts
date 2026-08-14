@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <type_traits>
 
 #include <cuda_runtime.h>
 
@@ -35,8 +36,13 @@ using ActsExamples::CudaHoughTransformUtils::LayerMask;
 using ActsExamples::CudaHoughTransformUtils::PeakFinder;
 using ActsExamples::CudaHoughTransformUtils::YieldType;
 
-constexpr CoordType etaWidthScale = 1.0;  // mm
-constexpr CoordType etaMaxWidth = 1.0;    // mm
+namespace HoughDetail = ActsExamples::CudaHoughTransformUtils::detail;
+namespace PeakFinders = ActsExamples::CudaHoughTransformUtils::PeakFinders;
+
+// Top-hat measurement widths. MDT bands also include the variation across one
+// tanBeta bin in etaYHalfWidth.
+constexpr CoordType etaWidthScale = 1.0;
+constexpr CoordType etaMaxWidth = 1.0 * Acts::UnitConstants::mm;
 constexpr CoordType etaStripWidthScale = 3.0;
 
 __device__ inline CoordType etaYHalfWidth(const HoughAxisRanges& ranges,
@@ -70,9 +76,40 @@ __device__ inline CoordType etaStripHalfWidth(CoordType covariance) {
          etaStripWidthScale;
 }
 
-namespace HoughDetail = ActsExamples::CudaHoughTransformUtils::detail;
+struct EtaHitBands {
+  CoordType central = 0.0;
+  CoordType negative = 0.0;
+  CoordType positive = 0.0;
+  CoordType halfWidth = 0.0;
+  bool isMdt = false;
+};
 
-namespace PeakFinders = ActsExamples::CudaHoughTransformUtils::PeakFinders;
+/// Evaluate the Hough bands once so filling and hit association use identical
+/// geometry and uncertainty broadening.
+__device__ inline EtaHitBands evaluateEtaHitBands(
+    CudaHoughPlaneBatchArrays plane, CudaMuonSpacePointArrays spacePoints,
+    const HoughAxisRanges& ranges, std::uint32_t xBin,
+    std::uint32_t hitIndex, std::uint32_t rawId, CoordType widthScale,
+    CoordType maxWidth) {
+  const bool isMdt = muonIdIsMdt(rawId);
+  const CoordType tanBeta = HoughDetail::binCenterDevice(
+      ranges.xMin, ranges.xMax, plane.nBinsX, xBin);
+  const CoordType y = spacePoints.localPositionY[hitIndex];
+  const CoordType z = spacePoints.localPositionZ[hitIndex];
+  const CoordType radius =
+      isMdt ? spacePoints.driftRadius[hitIndex] : CoordType{0.0};
+  const CoordType central = y - tanBeta * z;
+  const CoordType projectedRadius =
+      radius * sqrt(CoordType{1.0} + tanBeta * tanBeta);
+  const CoordType covariance = spacePoints.covariance1[hitIndex];
+  const CoordType halfWidth =
+      isMdt ? etaYHalfWidth(ranges, plane.nBinsX, z, radius, covariance,
+                            widthScale, maxWidth)
+            : etaStripHalfWidth(covariance);
+
+  return {central, central - projectedRadius, central + projectedRadius,
+          halfWidth, isMdt};
+}
 
 __device__ inline CoordType minimum(CoordType first, CoordType second) {
   return first < second ? first : second;
@@ -106,44 +143,22 @@ __device__ inline bool etaHitContributesToMaximum(
   const HoughAxisRanges ranges{baseRanges.xMin, baseRanges.xMax,
                                plane.yMin[bucket], plane.yMax[bucket]};
 
-  const CoordType tanTheta = HoughDetail::binCenterDevice(
-      ranges.xMin, ranges.xMax, plane.nBinsX, selectedXBin);
-
   const std::uint32_t rawId = spacePoints.muonId[hitIndex];
   if (!muonIdMeasuresEta(rawId)) {
     return false;
   }
-  const bool isMdt = muonIdIsMdt(rawId);
+  const EtaHitBands bands = evaluateEtaHitBands(
+      plane, spacePoints, ranges, selectedXBin, hitIndex, rawId, widthScale,
+      maxWidth);
 
-  const CoordType y = spacePoints.localPositionY[hitIndex];
-  const CoordType z = spacePoints.localPositionZ[hitIndex];
-  const CoordType radius =
-      isMdt ? spacePoints.driftRadius[hitIndex] : CoordType{0.0};
-  const CoordType covariance = spacePoints.covariance1[hitIndex];
-
-  // Must use the same width definition as Hough filling.
-  const CoordType width =
-      isMdt ? etaYHalfWidth(ranges, plane.nBinsX, z, radius, covariance,
-                            widthScale, maxWidth)
-            : etaStripHalfWidth(covariance);
-
-  const CoordType centralIntercept = y - tanTheta * z;
-
-  if (!isMdt) {
-    return yBinInsideBand(selectedYBin, centralIntercept, width, ranges,
+  if (!bands.isMdt) {
+    return yBinInsideBand(selectedYBin, bands.central, bands.halfWidth, ranges,
                           plane.nBinsY);
   }
 
-  const CoordType projectedRadius =
-      radius * sqrt(CoordType{1.0} + tanTheta * tanTheta);
-
-  const CoordType negativeIntercept = centralIntercept - projectedRadius;
-
-  const CoordType positiveIntercept = centralIntercept + projectedRadius;
-
-  return yBinInsideBand(selectedYBin, negativeIntercept, width, ranges,
+  return yBinInsideBand(selectedYBin, bands.negative, bands.halfWidth, ranges,
                         plane.nBinsY) ||
-         yBinInsideBand(selectedYBin, positiveIntercept, width, ranges,
+         yBinInsideBand(selectedYBin, bands.positive, bands.halfWidth, ranges,
                         plane.nBinsY);
 }
 
@@ -217,7 +232,7 @@ __global__ void fillEtaSpacePointsBatchKernel(
     CoordType widthScale, CoordType maxWidth, YieldType weight) {
   const std::uint32_t nCells = plane.nBinsX * plane.nBinsY;
 
-  // 1. Allocate the shared mem
+  // Lay out the transient accumulator and peak-finding workspace.
   extern __shared__ unsigned char sharedMemory[];
 
   auto* sharedHits = reinterpret_cast<YieldType*>(sharedMemory);
@@ -246,30 +261,21 @@ __global__ void fillEtaSpacePointsBatchKernel(
   constexpr std::size_t peakMaskElementSize =
       peakFinder != PeakFinder::GlobalMaximum ? sizeof(std::uint8_t) : 0u;
 
-  constexpr std::size_t candidateAlignment =
-      peakFinder != PeakFinder::GlobalMaximum
-          ? alignof(PeakFinders::RankedPeakCandidate)
-          : alignof(PeakFinders::GlobalMaximumCandidate);
+  using Candidate = std::conditional_t<
+      peakFinder == PeakFinder::GlobalMaximum,
+      PeakFinders::GlobalMaximumCandidate, PeakFinders::RankedPeakCandidate>;
 
   const std::size_t candidateOffset = HoughDetail::alignUp(
-      peakMaskOffset + nCells * peakMaskElementSize, candidateAlignment);
+      peakMaskOffset + nCells * peakMaskElementSize, alignof(Candidate));
 
   auto* sharedCandidates =
-      reinterpret_cast<PeakFinders::GlobalMaximumCandidate*>(sharedMemory +
-                                                             candidateOffset);
+      reinterpret_cast<Candidate*>(sharedMemory + candidateOffset);
 
-  auto* sharedRankedCandidates =
-      reinterpret_cast<PeakFinders::RankedPeakCandidate*>(sharedMemory +
-                                                           candidateOffset);
-
-  // 2. Start grid stride loop over buckets
   for (std::uint32_t bucket = blockIdx.x; bucket < plane.nBuckets;
        bucket += gridDim.x) {
-    // 2.1 Each bucket has own ranges
     const HoughAxisRanges ranges{baseRanges.xMin, baseRanges.xMax,
                                  plane.yMin[bucket], plane.yMax[bucket]};
 
-    // 2.2 Prepare shared memory
     for (std::uint32_t localBin = threadIdx.x; localBin < nCells;
          localBin += blockDim.x) {
       sharedHits[localBin] = YieldType{0.0};
@@ -280,7 +286,6 @@ __global__ void fillEtaSpacePointsBatchKernel(
 
     __syncthreads();
 
-    // 2.3 Definitions for local ranges
     const std::uint32_t bucketStart = spacePoints.bucketStart[bucket];
 
     const std::uint32_t bucketEnd = spacePoints.bucketEnd[bucket];
@@ -289,9 +294,7 @@ __global__ void fillEtaSpacePointsBatchKernel(
 
     const std::uint32_t nTasks = nHits * plane.nBinsX;
 
-    // 2.4 Start thread stride loop
     for (std::uint32_t task = threadIdx.x; task < nTasks; task += blockDim.x) {
-      // 2.5.1 Calculate the variables
       const std::uint32_t xBin = task % plane.nBinsX;
 
       const std::uint32_t localHit = task / plane.nBinsX;
@@ -302,56 +305,31 @@ __global__ void fillEtaSpacePointsBatchKernel(
       if (!muonIdMeasuresEta(rawId)) {
         continue;
       }
-      const bool isMdt = muonIdIsMdt(rawId);
-
-      const CoordType tanTheta = HoughDetail::binCenterDevice(
-          ranges.xMin, ranges.xMax, plane.nBinsX, xBin);
-
-      const CoordType y = spacePoints.localPositionY[hitIndex];
-
-      const CoordType z = spacePoints.localPositionZ[hitIndex];
-
-      const CoordType radius =
-          isMdt ? spacePoints.driftRadius[hitIndex] : CoordType{0.0};
-
-      const CoordType centralIntercept = y - tanTheta * z;
-
-      const CoordType projectedRadius =
-          radius * sqrt(CoordType{1.0} + tanTheta * tanTheta);
-
-      const CoordType negativeIntercept = centralIntercept - projectedRadius;
-
-      const CoordType positiveIntercept = centralIntercept + projectedRadius;
-
-      const CoordType covariance = spacePoints.covariance1[hitIndex];
-
       const unsigned layer = detLayer(rawId);
+      const EtaHitBands bands = evaluateEtaHitBands(
+          plane, spacePoints, ranges, xBin, hitIndex, rawId, widthScale,
+          maxWidth);
 
-      const CoordType width =
-          isMdt ? etaYHalfWidth(ranges, plane.nBinsX, z, radius, covariance,
-                                widthScale, maxWidth)
-                : etaStripHalfWidth(covariance);
-
-      if (!isMdt) {
+      if (!bands.isMdt) {
         const HoughDetail::YBinRange stripBand =
             HoughDetail::fillSharedYBand(
                 sharedHits, sharedLayers, sharedLayerMask, plane, ranges, xBin,
-                centralIntercept, width, layer, weight);
+                bands.central, bands.halfWidth, layer, weight);
         HoughDetail::countSharedYBand(sharedAssociatedHits, plane.nBinsX, xBin,
                                       stripBand);
         continue;
       }
 
-      // 2.5.2 Fill both solution bands. The accumulator deliberately counts
+      // Fill both solution bands. The accumulator deliberately counts
       // both contributions, including an overlap between the two bands.
       const HoughDetail::YBinRange negativeBand =
           HoughDetail::fillSharedYBand(
               sharedHits, sharedLayers, sharedLayerMask, plane, ranges, xBin,
-              negativeIntercept, width, layer, weight);
+              bands.negative, bands.halfWidth, layer, weight);
       const HoughDetail::YBinRange positiveBand =
           HoughDetail::fillSharedYBand(
               sharedHits, sharedLayers, sharedLayerMask, plane, ranges, xBin,
-              positiveIntercept, width, layer, weight);
+              bands.positive, bands.halfWidth, layer, weight);
 
       // Association counts are different: one input hit contributes at most
       // once to a cell, even when both drift-circle solutions cover it.
@@ -362,7 +340,7 @@ __global__ void fillEtaSpacePointsBatchKernel(
 
     __syncthreads();
 
-    // 2.6 Find and append the configured maxima.
+    // Find and append the configured maxima.
     if constexpr (peakFinder == PeakFinder::GlobalMaximum) {
       const PeakFinders::GlobalMaximumCandidate peak =
           PeakFinders::findGlobalMaximum(sharedHits, nCells, sharedCandidates);
@@ -412,7 +390,7 @@ __global__ void fillEtaSpacePointsBatchKernel(
       const PeakFinders::RankedPeakCandidate referencePeak =
           PeakFinders::findBestMarkedPeak(
               sharedHits, sharedLayers, sharedAssociatedHits, sharedPeakMask,
-              nCells, sharedRankedCandidates);
+              nCells, sharedCandidates);
 
       PeakFinders::findRelativeNmsPeaks(
           sharedHits, sharedLayers, sharedAssociatedHits, plane.nBinsX,
@@ -426,7 +404,7 @@ __global__ void fillEtaSpacePointsBatchKernel(
         const PeakFinders::RankedPeakCandidate bestPeak =
             PeakFinders::findBestMarkedPeak(
                 sharedHits, sharedLayers, sharedAssociatedHits, sharedPeakMask,
-                nCells, sharedRankedCandidates);
+                nCells, sharedCandidates);
 
         if (bestPeak.localBin ==
             std::numeric_limits<std::uint32_t>::max()) {
@@ -538,19 +516,11 @@ void etaHoughTransformImpl(CudaHoughPlaneBatch& plane,
   }
 
   if (!spacePoints.isOnDevice()) {
-    if (stream == nullptr) {
-      spacePoints.moveToDevice();
-    } else {
-      spacePoints.moveToDevice(stream);
-    }
+    spacePoints.moveToDevice(stream);
   }
 
   if (!plane.isOnDevice()) {
-    if (stream == nullptr) {
-      plane.moveToDevice();
-    } else {
-      plane.moveToDevice(stream);
-    }
+    plane.moveToDevice(stream);
   }
 
   ACTS_CUDA_CHECK(cudaMemsetAsync(maxima.nMaxima, 0,
