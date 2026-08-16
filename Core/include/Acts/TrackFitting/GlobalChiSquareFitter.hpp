@@ -55,26 +55,6 @@ constexpr TrackStatePropMask trackStateMask = TrackStatePropMask::Smoothed |
                                               TrackStatePropMask::Jacobian |
                                               TrackStatePropMask::Calibrated;
 
-// A projector used for scattering. By using Jacobian * phiThetaProjector one
-// gets only the derivatives for the variables phi and theta.
-const Acts::Matrix<eBoundSize, 2> phiThetaProjector = [] {
-  Acts::Matrix<eBoundSize, 2> m = Acts::Matrix<eBoundSize, 2>::Zero();
-  m(eBoundPhi, 0) = 1.0;
-  m(eBoundTheta, 1) = 1.0;
-  return m;
-}();
-
-// A projector used for scattering and energy loss. By using Jacobian *
-// phiThetaQOverPProjector one gets the derivatives for the variables phi,
-// theta, and q/p.
-const Acts::Matrix<eBoundSize, 3> phiThetaQOverPProjector = [] {
-  Acts::Matrix<eBoundSize, 3> m = Acts::Matrix<eBoundSize, 3>::Zero();
-  m(eBoundPhi, 0) = 1.0;
-  m(eBoundTheta, 1) = 1.0;
-  m(eBoundQOverP, 2) = 1.0;
-  return m;
-}();
-
 }  // namespace Gx2fConstants
 
 /// @brief A container to store material properties for each material surface
@@ -98,19 +78,26 @@ struct Gx2fMaterialProperties {
     /// @returns The lost energy at the surface
     constexpr double lostEnergy() const { return m_lostEnergy; }
 
-    /// The inverse of the uncertainty on the lost energy
-    /// @returns The inverse lost sigma
-    constexpr double invLostSigma() const { return m_invLossSigma; }
+    constexpr double lostSigma() const { return m_lossSigma; }
 
     /// Default constructor to construct an invalid energy loss
     ELossAtSurface() = default;
     /// Constructor taking the measured energy loss and its uncertainty
     /// @param energy: The measured lost energy at the corresponding surface
     /// @param sigma: The uncertainty on the measured lost energy
-    explicit ELossAtSurface(const double energy, const double sigma)
+    explicit ELossAtSurface(const double energy, const double sigma) noexcept
         : m_isValid{std::min(energy, sigma) > Acts::s_epsilon},
           m_lostEnergy{energy},
-          m_invLossSigma{isValid() ? 1. / sigma : 0.} {}
+          m_lossSigma{sigma} {}
+
+    ELossAtSurface& operator+=(const ELossAtSurface& other) noexcept {
+      if (&other != this && other.isValid()) {
+        m_lostEnergy += other.m_lostEnergy;
+        m_lossSigma = Acts::fastHypot(m_lossSigma, other.lostSigma());
+        m_isValid = true;
+      }
+      return *this;
+    }
 
    private:
     /// Flag toggling whether the parameters are valid
@@ -118,7 +105,7 @@ struct Gx2fMaterialProperties {
     /// The amount of lost energy at a given surface
     double m_lostEnergy{0.};
     /// The uncertainty on the lost energy
-    double m_invLossSigma{0.};
+    double m_lossSigma{0.};
   };
 
   /// Auxiliary struct to describe the material scattering at a surface
@@ -126,19 +113,26 @@ struct Gx2fMaterialProperties {
     /// Is the scattering uncertainty valid
     constexpr bool isValid() const { return m_isValid; }
 
-    constexpr double invSigma() const { return m_invSigma; }
+    constexpr double sigma() const { return m_sigma; }
     /// Default constructor to construct an invalid scatterer
     ScatteringAtSurface() = default;
     /// Constructor taking the width of the scatterer
     explicit ScatteringAtSurface(const double sigma)
-        : m_isValid{sigma > Acts::s_epsilon},
-          m_invSigma{isValid() ? 1. / sigma : 0.} {}
+        : m_isValid{sigma > Acts::s_epsilon}, m_sigma{sigma} {}
 
+    ScatteringAtSurface& operator+=(const ScatteringAtSurface& other) {
+      if (&other != this && other.isValid()) {
+        m_sigma += other.sigma();
+        m_isValid = true;
+      }
+
+      return *this;
+    }
     /// Flag toggling whether the scatterer is valid
     bool m_isValid{false};
     /// The inverse uncertainty on the scattering angles calculated
     /// using e.g. the Highland formula
-    double m_invSigma{0.};
+    double m_sigma{0.};
   };
 
   /// @brief Constructor to initialize material properties.
@@ -148,7 +142,9 @@ struct Gx2fMaterialProperties {
   /// @param materialIsValid_ A boolean flag indicating whether the material is valid.
   explicit Gx2fMaterialProperties(ScatteringAtSurface&& scatterer,
                                   ELossAtSurface&& eLoss)
-      : m_scatterer{std::move(scatterer)}, m_eloss{std::move(eLoss)} {}
+      : m_scatterer{std::move(scatterer)},
+        m_eloss{std::move(eLoss)},
+        m_lostEnergy{m_eloss.isValid() ? m_eloss.lostEnergy() : 0.} {}
 
   /// @brief Accessor for the material validity flag
   /// @return True if material is valid for scattering calculations, false for vacuum or zero thickness
@@ -324,7 +320,17 @@ struct Gx2FitterOptions {
   /// Flag to toggle whether material is fitted simultaneously with
   /// the track parameters or whether the material update is just
   /// a small adjustment to the track parameters
-  bool includeMaterialInIter = false;
+  bool includeMaterialInIter = true;
+
+  /// Cutoff value on the scattering uncertainty to fine tune the number of
+  /// scattering angles in the fit. Instead of creating scattering states at
+  /// each material surface, a scatterer is only created if the uncertainy on
+  /// the theta scattering angle exceeds the threshold. Otherwise the material
+  /// is accumulated
+  double scatteringCutOff = 0.;
+  /// Cutoff value on the energy loss to fine tune the number of energy loss
+  /// parameters in the fit
+  double elossCutOff = 0.;
 
   /// Whether to include non-linear correction during global to local
   /// transformation
@@ -342,6 +348,16 @@ template <typename traj_t>
 struct Gx2FitterResult {
   /// Fitted states that the actor has handled.
   traj_t* fittedStates{nullptr};
+
+  /// The materialMap stores for each visited surface their scattering
+  /// properties
+  std::unordered_map<GeometryIdentifier, Gx2fMaterialProperties> materialMap{};
+
+  /// Accumulated energy loss to cache the energy loss which is below the
+  /// threshold
+  Gx2fMaterialProperties::ELossAtSurface accEloss{};
+  /// Accumulated scattering
+  Gx2fMaterialProperties::ScatteringAtSurface accScatterer{};
 
   /// This is the index of the 'tip' of the track stored in multitrajectory.
   /// This corresponds to the last measurement state in the multitrajectory.
@@ -722,15 +738,17 @@ class Gx2Fitter {
     bool doMultipleScattering = false;
 
     /// Whether to consider energy loss.
-    bool doEnergyLoss = false;  /// TODO implement later
+    bool doEnergyLoss = false;
+
+    double scatteringCutOff = 0.;
+    /// Cutoff value on the energy loss to fine tune the number of energy loss
+    /// parameters
+    /// in the fit
+    double elossCutOff = 0.;
 
     /// Whether to include non-linear correction during global to local
     /// transformation
     FreeToBoundCorrection freeToBoundCorrection;
-
-    /// Input MultiTrajectory
-    std::shared_ptr<MultiTrajectory<traj_t>> outputStates;
-
     /// The logger instance
     const Logger* actorLogger{nullptr};
 
@@ -747,11 +765,6 @@ class Gx2Fitter {
 
     /// The particle hypothesis is needed for estimating scattering angles
     const BoundTrackParameters* parametersWithHypothesis = nullptr;
-
-    /// The materialMap stores for each visited surface their scattering
-    /// properties
-    std::unordered_map<GeometryIdentifier, Gx2fMaterialProperties>*
-        materialMap = nullptr;
 
     /// @brief Gx2f actor operation
     ///
@@ -850,11 +863,11 @@ class Gx2Fitter {
       const GeometryIdentifier geoId = surface->geometryId();
 
       auto sourceLinkIt = inputMeasurements->find(surface);
-      auto materialItr = materialMap->find(geoId);
+      auto materialItr = result.materialMap.find(geoId);
       const bool isSensitive =
           surface->isSensitive() || sourceLinkIt != inputMeasurements->end();
       const bool hasMaterial = surface->hasMaterial() &&
-                               materialItr != materialMap->end() &&
+                               materialItr != result.materialMap.end() &&
                                materialItr->second.materialIsValid();
       /// The surface is neither sensitive or it carries material
       if (!isSensitive && !hasMaterial) {
@@ -960,17 +973,12 @@ class Gx2Fitter {
 
       // Found material - add a scatteringAngles entry if not done yet and
       // energy loss if enabled. Handling will happen later
-      ACTS_DEBUG("    The surface contains material, ...");
-      if (!materialMap) {
-        ACTS_ERROR(" Material map is undefined");
-        return Result<void>::failure(
-            std::make_error_code(std::errc::invalid_seek));
-      }
+      ACTS_DEBUG("    The surface contains material ...");
 
       const GeometryIdentifier geoId = surface->geometryId();
-      auto materialMapId = materialMap->find(geoId);
+      auto materialMapId = result.materialMap.find(geoId);
       /// Entry is already present. Nothing to be done
-      if (materialMapId != materialMap->end()) {
+      if (materialMapId != result.materialMap.end()) {
         ACTS_VERBOSE("   ....  entry is already in the material map.");
         result.materialParamIndices.push_back(
             result.materialParamIndices.back() + materialMapId->second.nDim());
@@ -993,8 +1001,11 @@ class Gx2Fitter {
       const MaterialSlab& slab = *slabResult;
       const bool goodSlab = !slab.isVacuum();
 
-      Gx2fMaterialProperties::ELossAtSurface eLoss{};
-      Gx2fMaterialProperties::ScatteringAtSurface scatterer{};
+      using ScatteringAtSurface = Gx2fMaterialProperties::ScatteringAtSurface;
+      using ELossAtSurface = Gx2fMaterialProperties::ELossAtSurface;
+
+      ELossAtSurface eLoss{};
+      ScatteringAtSurface scatterer{};
 
       if (goodSlab) {
         const auto& particle = parametersWithHypothesis->particleHypothesis();
@@ -1007,7 +1018,7 @@ class Gx2Fitter {
                 particle.absoluteCharge()));
         ACTS_VERBOSE("        The Highland formula gives sigma = " << sigma);
 
-        scatterer = Gx2fMaterialProperties::ScatteringAtSurface{sigma};
+        scatterer = ScatteringAtSurface{sigma};
 
       } else {
         ACTS_VERBOSE("        Material slab is not valid.");
@@ -1024,7 +1035,7 @@ class Gx2Fitter {
         if (!eLoss.isValid() && goodSlab) {
           const auto& particle = parametersWithHypothesis->particleHypothesis();
 
-          eLoss = Gx2fMaterialProperties::ELossAtSurface{
+          eLoss = ELossAtSurface{
               computeEnergyLossMean(
                   slab, particle.absolutePdg(), particle.mass(),
                   parametersWithHypothesis->parameters()[eBoundQOverP],
@@ -1037,10 +1048,28 @@ class Gx2Fitter {
                   particle.absoluteCharge()))};
         }
       }
+
+      /// Accumulate the material across surfaces
+      scatterer += result.accScatterer;
+      eLoss += result.accEloss;
+      if (scatterer.sigma() < scatteringCutOff) {
+        result.accScatterer = std::move(scatterer);
+        scatterer = ScatteringAtSurface{};
+      } else {
+        result.accScatterer = ScatteringAtSurface{};
+      }
+
+      if (eLoss.lostEnergy() < elossCutOff) {
+        result.accEloss = std::move(eLoss);
+        eLoss = ELossAtSurface{};
+      } else {
+        result.accEloss = ELossAtSurface{};
+      }
+
       materialMapId =
-          materialMap
-              ->emplace(geoId, Gx2fMaterialProperties{std::move(scatterer),
-                                                      std::move(eLoss)})
+          result.materialMap
+              .emplace(geoId, Gx2fMaterialProperties{std::move(scatterer),
+                                                     std::move(eLoss)})
               .first;
       result.materialParamIndices.push_back(result.materialParamIndices.back() +
                                             materialMapId->second.nDim());
@@ -1157,11 +1186,12 @@ class Gx2Fitter {
       if (gx2fOptions.includeMaterialInIter) {
         gx2fActor.doMultipleScattering = gx2fOptions.doMultipleScattering;
         gx2fActor.doEnergyLoss = gx2fOptions.doEnergyLoss;
+        gx2fActor.scatteringCutOff = gx2fOptions.scatteringCutOff;
+        gx2fActor.elossCutOff = gx2fOptions.elossCutOff;
       }
       gx2fActor.extensions = gx2fOptions.extensions;
       gx2fActor.calibrationContext = &gx2fOptions.calibrationContext.get();
       gx2fActor.actorLogger = m_actorLogger.get();
-      gx2fActor.materialMap = &materialMap;
       gx2fActor.parametersWithHypothesis = &params;
 
       auto propagatorState = m_propagator.makeState(propagatorOptions);
@@ -1176,6 +1206,7 @@ class Gx2Fitter {
 
       auto& r = propagatorState.template get<Gx2FitterResult<traj_t>>();
       r.fittedStates = &trajectoryTempBackend;
+      r.materialMap = std::move(materialMap);
 
       // Clear the track container. It could be more performant to update the
       // existing states, but this needs some more thinking.
@@ -1197,6 +1228,8 @@ class Gx2Fitter {
       // makeMeasurements
       auto& propRes = *result;
       GX2FResult gx2fResult = std::move(propRes.template get<GX2FResult>());
+      /// Move back the material map
+      materialMap = std::move(gx2fResult.materialMap);
 
       auto track = trackContainerTemp.makeTrack();
       tipIndex = gx2fResult.lastMeasurementIndex;
@@ -1322,8 +1355,9 @@ class Gx2Fitter {
       gx2fActor.extensions = gx2fOptions.extensions;
       gx2fActor.calibrationContext = &gx2fOptions.calibrationContext.get();
       gx2fActor.actorLogger = m_actorLogger.get();
-      gx2fActor.materialMap = &materialMap;
       gx2fActor.parametersWithHypothesis = &params;
+      gx2fActor.scatteringCutOff = gx2fOptions.scatteringCutOff;
+      gx2fActor.elossCutOff = gx2fOptions.elossCutOff;
 
       auto propagatorState = m_propagator.makeState(propagatorOptions);
 
@@ -1460,7 +1494,6 @@ class Gx2Fitter {
       gx2fActor.extensions = gx2fOptions.extensions;
       gx2fActor.calibrationContext = &gx2fOptions.calibrationContext.get();
       gx2fActor.actorLogger = m_actorLogger.get();
-      gx2fActor.materialMap = &materialMap;
       gx2fActor.parametersWithHypothesis = &params;
 
       auto propagatorState = m_propagator.makeState(propagatorOptions);
@@ -1475,6 +1508,7 @@ class Gx2Fitter {
 
       auto& r = propagatorState.template get<Gx2FitterResult<traj_t>>();
       r.fittedStates = &trackContainer.trackStateContainer();
+      r.materialMap = std::move(materialMap);
 
       // Run the fitter
       auto propagationResult = m_propagator.propagate(propagatorState);
@@ -1490,6 +1524,7 @@ class Gx2Fitter {
 
       auto& propRes = *result;
       GX2FResult gx2fResult = std::move(propRes.template get<GX2FResult>());
+      materialMap = std::move(gx2fResult.materialMap);
 
       if (tipIndex != gx2fResult.lastMeasurementIndex) {
         ACTS_INFO("Final fit used unreachable measurements.");

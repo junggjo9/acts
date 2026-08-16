@@ -12,6 +12,26 @@
 
 namespace Acts::Experimental {
 
+// A projector used for scattering. By using Jacobian * phiThetaProjector one
+// gets only the derivatives for the variables phi and theta.
+const Acts::Matrix<eBoundSize, 2> phiThetaProjector = [] {
+  Acts::Matrix<eBoundSize, 2> m = Acts::Matrix<eBoundSize, 2>::Zero();
+  m(eBoundPhi, 0) = 1.0;
+  m(eBoundTheta, 1) = 1.0;
+  return m;
+}();
+
+// A projector used for scattering and energy loss. By using Jacobian *
+// phiThetaQOverPProjector one gets the derivatives for the variables phi,
+// theta, and q/p.
+const Acts::Matrix<eBoundSize, 3> phiThetaQOverPProjector = [] {
+  Acts::Matrix<eBoundSize, 3> m = Acts::Matrix<eBoundSize, 3>::Zero();
+  m(eBoundPhi, 0) = 1.0;
+  m(eBoundTheta, 1) = 1.0;
+  m(eBoundQOverP, 2) = 1.0;
+  return m;
+}();
+
 void Gx2fMaterialProperties::updateParameters(
     const Eigen::VectorXd& deltaParamsExtended, const std::size_t stateIdx) {
   if (m_scatterer.isValid()) {
@@ -41,7 +61,7 @@ void Gx2fMaterialProperties::contributionToGx2fSums(
     Gx2fSystem& extendedSystem, const double theta, const std::size_t stateIdx,
     const Logger& logger) const {
   if (m_scatterer.isValid()) {
-    const double invCovTheta = Acts::square(m_scatterer.invSigma());
+    const double invCovTheta = Acts::square(1. / m_scatterer.sigma());
     const double sinThetaLoc = std::sin(theta);
     const double invCovPhi = invCovTheta * Acts::square(sinThetaLoc);
 
@@ -54,40 +74,39 @@ void Gx2fMaterialProperties::contributionToGx2fSums(
     extendedSystem.aMatrix()(stateIdx + 1, stateIdx + 1) += invCovTheta;
     extendedSystem.bVector()(stateIdx + 1, 0) -= invCovTheta * deltaTheta();
     extendedSystem.chi2() += invCovTheta * Acts::square(deltaTheta());
-    ACTS_INFO("Scattering contributions in contributionToGx2fSums:\n"
-              << "     index: " << stateIdx << "-" << (stateIdx + 1) << " \n"
-              << "    invCov:        " << invCovPhi << "\n"
-              << "    sinThetaLoc:   " << sinThetaLoc << "\n"
-              << "    Phi:\n"
-              << "        scattering angle:     " << deltaPhi() << "\n"
-              << "        aMatrix contribution: " << invCovPhi << "\n"
-              << "        bVector contribution: " << invCovPhi * deltaPhi()
-              << "\n"
-              << "        chi2sum contribution: "
-              << invCovPhi * Acts::square(deltaPhi()) << "\n"
-              << "    Theta:\n"
-              << "        scattering angle:     " << deltaTheta() << "\n"
-              << "        aMatrix contribution: " << invCovTheta << "\n"
-              << "        bVector contribution: " << invCovTheta * deltaTheta()
-              << "\n"
-              << "        chi2sum contribution: "
-              << invCovTheta * Acts::square(deltaTheta()));
+    ACTS_VERBOSE("Scattering contributions in contributionToGx2fSums:\n"
+                 << "     index: " << stateIdx << "-" << (stateIdx + 1) << " \n"
+                 << "    invCov:        " << invCovPhi << "\n"
+                 << "    sinThetaLoc:   " << sinThetaLoc << "\n"
+                 << "    Phi:\n"
+                 << "        scattering angle:     " << deltaPhi() << "\n"
+                 << "        aMatrix contribution: " << invCovPhi << "\n"
+                 << "        bVector contribution: " << invCovPhi * deltaPhi()
+                 << "\n"
+                 << "        chi2sum contribution: "
+                 << invCovPhi * Acts::square(deltaPhi()) << "\n"
+                 << "    Theta:\n"
+                 << "        scattering angle:     " << deltaTheta() << "\n"
+                 << "        aMatrix contribution: " << invCovTheta << "\n"
+                 << "        bVector contribution: "
+                 << invCovTheta * deltaTheta() << "\n"
+                 << "        chi2sum contribution: "
+                 << invCovTheta * Acts::square(deltaTheta()));
   }
 
   if (m_eloss.isValid()) {
     const std::size_t eLossIdx = stateIdx + (nDim() - 1ul);
     extendedSystem.aMatrix()(eLossIdx, eLossIdx) = 1.;
-    // extendedSystem.chi2() +=
-    // Acts::square(m_eloss.invLostSigma()*(m_lostEnergy -
-    // m_eloss.lostEnergy()));
+    extendedSystem.chi2() += Acts::square(
+        (m_lostEnergy - m_eloss.lostEnergy()) / m_eloss.lostSigma());
     ACTS_VERBOSE("Energy loss contributions in contributionToGx2fSums:\n"
                  << "       index: " << eLossIdx << " \n"
                  << "       measured loss: " << m_eloss.lostEnergy() << "+-"
-                 << (1. / m_eloss.invLostSigma()) << ", \n"
+                 << (m_eloss.lostSigma()) << ", \n"
                  << "       currently estimated loss: " << m_lostEnergy << "\n"
                  << "  --> chi2 contribution: "
-                 << Acts::square(m_eloss.invLostSigma() *
-                                 (m_lostEnergy - m_eloss.lostEnergy())));
+                 << Acts::square((m_lostEnergy - m_eloss.lostEnergy()) /
+                                 m_eloss.lostSigma()));
   }
 }
 
@@ -161,9 +180,6 @@ void addMeasurementToGx2fSumsBackend(
        matSurface++) {
     const BoundMatrix jac = jacobianFromStart[matSurface];
 
-    // const Matrix<eBoundSize, 2> jacPhiTheta =
-    //     jac * Gx2fConstants::phiThetaProjector;
-
     // The position, where we need to insert the values in the extended Jacobian
     // accounting for material effects
     const std::size_t deltaPosition = materialIndices.at(matSurface - 1);
@@ -174,7 +190,7 @@ void addMeasurementToGx2fSumsBackend(
     //       jac * Gx2fConstants::phiThetaQOverPProjector;
     // } else {
     extendedJacobian.block<eBoundSize, 2>(0, deltaPosition) =
-        jac * Gx2fConstants::phiThetaProjector;
+        jac * phiThetaProjector;
     // }
   }
 
