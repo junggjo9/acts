@@ -186,9 +186,6 @@ struct Gx2fMaterialProperties {
                         const std::size_t firstParamIdx);
 
  private:
-  /// Vector of scattering angles. The vector is usually all zeros except for
-  /// eBoundPhi and eBoundTheta.
-  BoundVector m_scatteringAngles{BoundVector::Zero()};
   /// Description of the scattering angles
   ScatteringAtSurface m_scatterer{};
   /// Description of the energy loss
