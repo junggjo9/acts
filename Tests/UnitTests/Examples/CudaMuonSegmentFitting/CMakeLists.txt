@@ -13,5 +13,6 @@ set(unittest_extra_libraries
 
 add_unittest(CudaMuonSpacePoint CudaMuonSpacePointTests.cpp)
 add_unittest(EtaHoughTransform EtaHoughTransformTests.cpp)
+add_unittest(PhiHoughTransform PhiHoughTransformTests.cpp)
 add_unittest(EtaHoughTransformBenchmarks EtaHoughTransformBenchmarks.cpp)
 add_unittest(CudaMuonHoughMaximum CudaMuonHoughMaximumTests.cpp)

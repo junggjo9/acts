@@ -66,6 +66,13 @@ __host__ __device__ inline bool muonIdMeasuresEta(
   return (rawId & etaFlag) != 0u;
 }
 
+/// Return whether a raw MuonId measures the non-precision (Phi) coordinate.
+__host__ __device__ inline bool muonIdMeasuresPhi(
+    std::uint32_t rawId) noexcept {
+  static constexpr std::uint32_t phiFlag = 1u << 15u;
+  return (rawId & phiFlag) != 0u;
+}
+
 /// @brief Device-side raw structure-of-arrays view.
 ///
 /// This structure does not own memory. It only stores raw device pointers.

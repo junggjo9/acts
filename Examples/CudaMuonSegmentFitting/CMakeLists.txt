@@ -7,8 +7,10 @@ find_package(CUDAToolkit REQUIRED)
 acts_add_library(
     ExamplesCudaMuonSegmentFitting
     src/CudaMuonSpacePoint.cpp
+    src/CudaMuonSegmentSeed.cpp
     src/CudaHoughTransformUtils.cu
     src/EtaHoughTransform.cu
+    src/PhiHoughTransform.cu
     ACTS_INCLUDE_FOLDER include/ActsExamples
 )
 

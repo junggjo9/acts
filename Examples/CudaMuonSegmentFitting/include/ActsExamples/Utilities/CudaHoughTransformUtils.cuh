@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 
 #include <cuda_runtime.h>
 
@@ -607,15 +608,17 @@ __device__ inline std::uint32_t reserveMaximumSlot(
   return maxima.capacityPerBucket;
 }
 
-/// @brief Append an Eta maximum if the bucket still has a free slot.
+/// @brief Append a maximum if the bucket still has a free slot.
 /// @return Whether the candidate was stored.
-__device__ inline bool appendEtaMaximum(
+__device__ inline bool appendMaximum(
     CudaHoughMaximumBatchArrays maxima, const CudaHoughPlaneBatchArrays plane,
     const HoughAxisRanges ranges, const YieldType* sharedLayers,
     const LayerMask* sharedLayerMask,
     const std::uint32_t* sharedAssociatedHits, std::uint32_t bucket,
-    const GlobalMaximumCandidate& candidate) {
-  if (candidate.nHits <= YieldType{0.0} ||
+    const GlobalMaximumCandidate& candidate,
+    YieldType minimumYield = YieldType{0.0},
+    std::uint32_t additionalAssociatedHits = 0u) {
+  if (candidate.nHits < minimumYield || candidate.nHits <= YieldType{0.0} ||
       candidate.localBin == std::numeric_limits<std::uint32_t>::max()) {
     return false;
   }
@@ -643,7 +646,7 @@ __device__ inline bool appendEtaMaximum(
 
   maxima.layerMask[outputIndex] = sharedLayerMask[candidate.localBin];
   maxima.nAssociatedHits[outputIndex] =
-      sharedAssociatedHits[candidate.localBin];
+      sharedAssociatedHits[candidate.localBin] + additionalAssociatedHits;
 
   maxima.xBin[outputIndex] = xBin;
   maxima.yBin[outputIndex] = yBin;
@@ -651,14 +654,149 @@ __device__ inline bool appendEtaMaximum(
   return true;
 }
 
+/// Find and append peaks from one filled shared-memory Hough accumulator.
+/// Every thread in the block must call this function.
+template <PeakFinder peakFinder>
+__device__ inline void findAndAppendMaxima(
+    CudaHoughMaximumBatchArrays maxima, CudaHoughPlaneBatchArrays plane,
+    const HoughAxisRanges& ranges, const YieldType* sharedHits,
+    const YieldType* sharedLayers, const LayerMask* sharedLayerMasks,
+    const std::uint32_t* sharedAssociatedHits, std::uint8_t* sharedPeakMask,
+    std::conditional_t<peakFinder == PeakFinder::GlobalMaximum,
+                       GlobalMaximumCandidate, RankedPeakCandidate>*
+        sharedCandidates,
+    std::uint32_t bucket, const SlidingWindowConfig& slidingConfig,
+    const RelativeNmsConfig& nmsConfig,
+    YieldType minimumYield = YieldType{0.0},
+    std::uint32_t additionalAssociatedHits = 0u) {
+  const std::uint32_t nCells = plane.nBinsX * plane.nBinsY;
+
+  if constexpr (peakFinder == PeakFinder::GlobalMaximum) {
+    const GlobalMaximumCandidate peak =
+        findGlobalMaximum(sharedHits, nCells, sharedCandidates);
+    if (threadIdx.x == 0u) {
+      appendMaximum(maxima, plane, ranges, sharedLayers, sharedLayerMasks,
+                    sharedAssociatedHits, bucket, peak, minimumYield,
+                    additionalAssociatedHits);
+    }
+  } else if constexpr (peakFinder == PeakFinder::SlidingWindow) {
+    findSlidingWindowPeaks(sharedHits, plane.nBinsX, plane.nBinsY,
+                           slidingConfig, sharedPeakMask);
+    if (threadIdx.x == 0u) {
+      // Preserve the CPU implementation's deterministic x-major ordering.
+      for (std::uint32_t xBin = 0u; xBin < plane.nBinsX; ++xBin) {
+        for (std::uint32_t yBin = 0u; yBin < plane.nBinsY; ++yBin) {
+          std::uint32_t localBin = yBin * plane.nBinsX + xBin;
+          if (sharedPeakMask[localBin] == 0u) {
+            continue;
+          }
+          localBin = slidingWindowRecenter(sharedHits, plane.nBinsX,
+                                           plane.nBinsY, localBin,
+                                           slidingConfig);
+          const GlobalMaximumCandidate peak{sharedHits[localBin], localBin};
+          appendMaximum(maxima, plane, ranges, sharedLayers, sharedLayerMasks,
+                        sharedAssociatedHits, bucket, peak, minimumYield,
+                        additionalAssociatedHits);
+        }
+      }
+    }
+  } else {
+    markSupportedPeakCells(sharedHits, sharedLayers, sharedAssociatedHits,
+                           nCells, nmsConfig, sharedPeakMask);
+    const RankedPeakCandidate referencePeak = findBestMarkedPeak(
+        sharedHits, sharedLayers, sharedAssociatedHits, sharedPeakMask, nCells,
+        sharedCandidates);
+    findRelativeNmsPeaks(sharedHits, sharedLayers, sharedAssociatedHits,
+                         plane.nBinsX, plane.nBinsY, referencePeak.nHits,
+                         nmsConfig, sharedPeakMask);
+
+    const std::uint32_t selectionLimit =
+        maxima.capacityPerBucket < nmsConfig.maximumPeaks
+            ? maxima.capacityPerBucket
+            : nmsConfig.maximumPeaks;
+    for (std::uint32_t slot = 0u; slot < selectionLimit; ++slot) {
+      const RankedPeakCandidate bestPeak = findBestMarkedPeak(
+          sharedHits, sharedLayers, sharedAssociatedHits, sharedPeakMask,
+          nCells, sharedCandidates);
+      if (bestPeak.localBin ==
+          std::numeric_limits<std::uint32_t>::max()) {
+        break;
+      }
+      if (threadIdx.x == 0u) {
+        const GlobalMaximumCandidate candidate{bestPeak.nHits,
+                                                bestPeak.localBin};
+        appendMaximum(maxima, plane, ranges, sharedLayers, sharedLayerMasks,
+                      sharedAssociatedHits, bucket, candidate, minimumYield,
+                      additionalAssociatedHits);
+      }
+      suppressRelativeNmsNeighbours(sharedPeakMask, plane.nBinsX, plane.nBinsY,
+                                    bestPeak.localBin, nmsConfig);
+    }
+  }
+}
+
 }  // namespace ActsExamples::CudaHoughTransformUtils::PeakFinders
 
 namespace ActsExamples::CudaHoughTransformUtils::detail {
 
-/// Return the dynamic shared-memory size required by the Eta kernel.
-inline std::size_t sharedBytesForEtaHough(std::size_t nCells,
-                                          std::size_t threadsPerBlock,
-                                          PeakFinder peakFinder) {
+/// Typed view over the common accumulator and peak-finder shared workspace.
+template <PeakFinder peakFinder>
+struct HoughSharedWorkspace {
+  using Candidate = std::conditional_t<
+      peakFinder == PeakFinder::GlobalMaximum,
+      PeakFinders::GlobalMaximumCandidate, PeakFinders::RankedPeakCandidate>;
+
+  YieldType* hits = nullptr;
+  YieldType* layers = nullptr;
+  LayerMask* layerMasks = nullptr;
+  std::uint32_t* associatedHits = nullptr;
+  std::uint8_t* peakMask = nullptr;
+  Candidate* candidates = nullptr;
+};
+
+/// Map a dynamic shared-memory allocation to the common Hough workspace.
+template <PeakFinder peakFinder>
+__device__ inline HoughSharedWorkspace<peakFinder> makeHoughSharedWorkspace(
+    unsigned char* memory, std::size_t nCells) {
+  using Workspace = HoughSharedWorkspace<peakFinder>;
+  using Candidate = typename Workspace::Candidate;
+
+  Workspace workspace{};
+  workspace.hits = reinterpret_cast<YieldType*>(memory);
+  workspace.layers = workspace.hits + nCells;
+
+  const std::size_t layerMaskOffset =
+      alignUp(2u * nCells * sizeof(YieldType), alignof(LayerMask));
+  workspace.layerMasks =
+      reinterpret_cast<LayerMask*>(memory + layerMaskOffset);
+
+  const std::size_t associatedHitsOffset =
+      alignUp(layerMaskOffset + nCells * sizeof(LayerMask),
+              alignof(std::uint32_t));
+  workspace.associatedHits =
+      reinterpret_cast<std::uint32_t*>(memory + associatedHitsOffset);
+
+  const std::size_t peakMaskOffset =
+      associatedHitsOffset + nCells * sizeof(std::uint32_t);
+  if constexpr (peakFinder != PeakFinder::GlobalMaximum) {
+    workspace.peakMask =
+        reinterpret_cast<std::uint8_t*>(memory + peakMaskOffset);
+  }
+
+  constexpr std::size_t peakMaskElementSize =
+      peakFinder != PeakFinder::GlobalMaximum ? sizeof(std::uint8_t) : 0u;
+  const std::size_t candidateOffset =
+      alignUp(peakMaskOffset + nCells * peakMaskElementSize,
+              alignof(Candidate));
+  workspace.candidates =
+      reinterpret_cast<Candidate*>(memory + candidateOffset);
+  return workspace;
+}
+
+/// Return the dynamic shared-memory size required by a Hough fill kernel.
+inline std::size_t sharedBytesForHough(std::size_t nCells,
+                                       std::size_t threadsPerBlock,
+                                       PeakFinder peakFinder) {
   std::size_t bytes = 2u * nCells * sizeof(YieldType);
 
   bytes = alignUp(bytes, alignof(LayerMask));
