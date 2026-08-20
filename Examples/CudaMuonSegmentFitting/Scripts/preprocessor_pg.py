@@ -6,13 +6,13 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Prepare Particle Gun data (or generaly any) for Eta Hough validation.
+"""Prepare independent Eta/Phi truth for muon Hough validation.
 
 The source ROOT file stores detector space points and muon truth segments in
 separate trees, without a direct segment-to-bucket link. This script rebuilds
 that relation by combining geometry-ID overlap with drift-radius compatibility.
-It writes a compact ROOT input for the C++ validation test and, by default,
-four CSV files for preprocessor rejected segments analysis.
+The source MuonSpacePoints tree remains the canonical measurement input and is
+not copied. The output contains only bucket metadata and matched Eta/Phi truth.
 
 """
 
@@ -37,15 +37,8 @@ SPACE_BRANCHES = [
     "spacePoint_localPosX",
     "spacePoint_localPosY",
     "spacePoint_localPosZ",
-    "spacePoint_sensorDirPhi",
-    "spacePoint_sensorDirTheta",
-    "spacePoint_toNextDirPhi",
-    "spacePoint_toNextDirTheta",
     "spacePoint_driftRadius",
-    "spacePoint_time",
-    "spacePoint_covLoc0",
     "spacePoint_covLoc1",
-    "spacePoint_covT",
 ]
 
 TRUTH_BRANCHES = [
@@ -54,41 +47,32 @@ TRUTH_BRANCHES = [
     "Segments_localSegPars",
 ]
 
-# The preprocessed output uses one row per hit and repeats its bucket metadata.
-OUTPUT_SCHEMA = {
+# One compact row describes every physical space-point bucket.
+BUCKET_OUTPUT_SCHEMA = {
     "validation_bucket_id": "uint32",
+    "event_number": "uint32",
     "event_id": "uint32",
     "source_bucket_id": "uint16",
     "n_input_hits": "uint32",
     "n_truth_segments": "uint16",
-    "geometry_id": "uint64",
-    "muon_id": "uint32",
-    "local_pos_x": "float32",
-    "local_pos_y": "float32",
-    "local_pos_z": "float32",
-    "sensor_dir_phi": "float32",
-    "sensor_dir_theta": "float32",
-    "to_next_dir_phi": "float32",
-    "to_next_dir_theta": "float32",
-    "drift_radius": "float32",
-    "time": "float32",
-    "cov_loc0": "float32",
-    "cov_loc1": "float32",
-    "cov_t": "float32",
 }
 
-# Truth is stored separately: one row per matched segment, with variable-length
-# bucket-local hit indices linking the segment back to EtaValidationInput.
+# Truth hit indices are local to the source bucket in MuonSpacePoints.
 TRUTH_OUTPUT_SCHEMA = {
     "validation_truth_id": "uint32",
     "validation_bucket_id": "uint32",
+    "event_number": "uint32",
     "event_id": "uint32",
     "source_bucket_id": "uint16",
     "segment_index": "uint32",
-    "n_truth_hits": "uint32",
+    "n_eta_truth_hits": "uint32",
+    "n_phi_truth_hits": "uint32",
     "true_tanBeta": "float64",
     "true_y0": "float64",
-    "truth_hit_indices": "var * uint32",
+    "true_tanAlpha": "float64",
+    "true_x0": "float64",
+    "eta_truth_hit_indices": "var * uint32",
+    "phi_truth_hit_indices": "var * uint32",
 }
 
 
@@ -410,19 +394,38 @@ def classify_hits(y, z, radius, tan_beta, y0, tolerance):
     return mask, residuals, n_matching, mean_residual
 
 
+@njit(cache=True)
+def classify_phi_hits(x, z, tan_alpha, x0, tolerance):
+    """Classify Phi strips by their distance from the truth line."""
+    n_hits = len(x)
+    mask = np.zeros(n_hits, dtype=np.uint8)
+    residuals = np.empty(n_hits, dtype=np.float32)
+    n_matching = 0
+
+    for index in range(n_hits):
+        residual = abs(x[index] - x0 - tan_alpha * z[index])
+        residuals[index] = residual
+        if residual <= tolerance:
+            mask[index] = 1
+            n_matching += 1
+
+    return mask, residuals, n_matching
+
+
 def as_numpy(array, dtype):
     """Convert an Awkward event array into a typed NumPy array."""
     return np.asarray(ak.to_numpy(array), dtype=dtype)
 
 
 def decode_segment(parameters):
-    """Decode stored local parameters into the Hough line (tanBeta, y0)."""
+    """Decode stored local parameters into both Hough projections."""
     parameters = as_numpy(parameters, np.float64)
 
     if parameters.size < 4:
         return None
 
     y0 = float(parameters[0])
+    x0 = float(parameters[2])
     theta = np.deg2rad(float(parameters[1]))
     phi = np.deg2rad(float(parameters[3]))
 
@@ -432,21 +435,24 @@ def decode_segment(parameters):
         return None
 
     tan_beta = float(np.sin(theta) * np.sin(phi) / direction_z)
+    tan_alpha = float(np.sin(theta) * np.cos(phi) / direction_z)
 
-    if not np.isfinite(tan_beta) or not np.isfinite(y0):
+    if not all(np.isfinite(value) for value in (
+        tan_beta, y0, tan_alpha, x0
+    )):
         return None
 
-    return tan_beta, y0
+    return tan_beta, y0, tan_alpha, x0
 
 
-def flush_hit_buffer(tree, buffers):
-    """Append buffered hit columns to the output ROOT tree and release them."""
+def flush_bucket_buffer(tree, buffers):
+    """Append buffered bucket rows to the output ROOT tree."""
     if not buffers["event_id"]:
         return 0
 
     batch = {
-        branch: np.concatenate(chunks)
-        for branch, chunks in buffers.items()
+        branch: np.asarray(buffers[branch], dtype=np.dtype(dtype))
+        for branch, dtype in BUCKET_OUTPUT_SCHEMA.items()
     }
 
     rows = len(batch["event_id"])
@@ -466,7 +472,9 @@ def flush_truth_buffer(tree, buffers):
     batch = {
         branch: (
             ak.Array(chunks)
-            if branch == "truth_hit_indices"
+            if branch in (
+                "eta_truth_hit_indices", "phi_truth_hit_indices"
+            )
             else np.asarray(chunks, dtype=np.dtype(dtype))
         )
         for branch, dtype in TRUTH_OUTPUT_SCHEMA.items()
@@ -484,7 +492,7 @@ def flush_truth_buffer(tree, buffers):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Create bucket-matched Eta Hough validation input."
+        description="Create independent bucket-matched Eta/Phi truth."
     )
 
     parser.add_argument("input", type=Path)
@@ -492,7 +500,7 @@ def main():
         "output",
         type=Path,
         nargs="?",
-        default=Path("EtaHoughFlatInput.root"),
+        default=Path("MuonHoughValidationTruth.root"),
     )
     parser.add_argument(
         "--truth-tolerance",
@@ -501,13 +509,19 @@ def main():
         help="Maximum |track-to-wire distance - drift radius| in mm.",
     )
     parser.add_argument(
+        "--phi-truth-tolerance",
+        type=float,
+        default=5.0,
+        help="Maximum Phi-strip distance from the truth line in mm.",
+    )
+    parser.add_argument(
         "--min-truth-hits",
         type=int,
         default=4,
         help="A segment matches a bucket when at least this many hits match.",
     )
     parser.add_argument("--max-events", type=int)
-    parser.add_argument("--flush-rows", type=int, default=500_000)
+    parser.add_argument("--flush-rows", type=int, default=100_000)
     parser.add_argument(
         "--unmatched-prefix",
         type=Path,
@@ -519,10 +533,18 @@ def main():
     parser.add_argument(
         "--unmatched-diagnostics",
         action="store_true",
-        help="Do not write unmatched-segment diagnostic CSV files.",
+        help="Write unmatched-segment diagnostic CSV files.",
     )
 
     args = parser.parse_args()
+    if args.max_events is not None and args.max_events <= 0:
+        parser.error("--max-events must be positive")
+    if args.flush_rows <= 0:
+        parser.error("--flush-rows must be positive")
+    if args.min_truth_hits <= 0:
+        parser.error("--min-truth-hits must be positive")
+    if args.truth_tolerance < 0.0 or args.phi_truth_tolerance < 0.0:
+        parser.error("truth tolerances must be non-negative")
 
     unmatched_prefix = args.unmatched_prefix
     if unmatched_prefix is None:
@@ -530,29 +552,72 @@ def main():
             args.output.stem + "_unmatched"
         )
 
-    # 1. Read the two independent source ROOT trees. 
+    # 1. Read the two independent source ROOT trees.
     with uproot.open(args.input) as input_file:
         space_tree = input_file["MuonSpacePoints"]
         truth_tree = input_file["MuonTruth"]
 
-        number_events = space_tree.num_entries
-
+        all_space_event_ids = space_tree["event_id"].array(library="np")
+        selected_entries = np.argsort(
+            all_space_event_ids, kind="stable"
+        )
         if args.max_events is not None:
-            number_events = min(number_events, args.max_events)
+            selected_entries = selected_entries[:args.max_events]
+        number_events = len(selected_entries)
+        if number_events == 0:
+            raise RuntimeError("No source events were selected")
 
         print(f"Reading {number_events} events...")
+        if args.max_events is None:
+            space_data = space_tree.arrays(
+                SPACE_BRANCHES,
+                library="ak",
+            )
+            event_order = selected_entries
+        else:
+            space_data = ak.concatenate([
+                space_tree.arrays(
+                    SPACE_BRANCHES,
+                    entry_start=int(entry),
+                    entry_stop=int(entry) + 1,
+                    library="ak",
+                )
+                for entry in selected_entries
+            ])
+            event_order = np.arange(number_events)
 
-        space_data = space_tree.arrays(
-            SPACE_BRANCHES,
-            entry_stop=number_events,
-            library="ak",
-        )
-
-        truth_data = truth_tree.arrays(
-            TRUTH_BRANCHES,
-            entry_stop=(number_events if args.max_events is not None else None),
-            library="ak", # akward arrays coz diffrenet sizes
-        )
+        if args.max_events is None:
+            truth_data = truth_tree.arrays(
+                TRUTH_BRANCHES,
+                library="ak",
+            )
+        else:
+            all_truth_event_ids = truth_tree["event_id"].array(library="np")
+            truth_entry_by_event = {
+                int(event_id): entry
+                for entry, event_id in enumerate(all_truth_event_ids)
+            }
+            selected_truth_entries = [
+                truth_entry_by_event[int(all_space_event_ids[entry])]
+                for entry in selected_entries
+                if int(all_space_event_ids[entry]) in truth_entry_by_event
+            ]
+            truth_chunks = [
+                truth_tree.arrays(
+                    TRUTH_BRANCHES,
+                    entry_start=entry,
+                    entry_stop=entry + 1,
+                    library="ak",
+                )
+                for entry in selected_truth_entries
+            ]
+            truth_data = (
+                ak.concatenate(truth_chunks)
+                if truth_chunks
+                else truth_tree.arrays(
+                    TRUTH_BRANCHES, entry_start=0, entry_stop=0, library="ak"
+                )
+            )
 
     space_event_ids = as_numpy(
         space_data["event_id"], np.uint32
@@ -568,13 +633,13 @@ def main():
         for entry, event_id in enumerate(truth_event_ids)
     }
 
-    hit_buffers = {branch: [] for branch in OUTPUT_SCHEMA}
+    bucket_buffers = {branch: [] for branch in BUCKET_OUTPUT_SCHEMA}
     truth_buffers = {branch: [] for branch in TRUTH_OUTPUT_SCHEMA}
 
     validation_bucket_id = 0
     validation_truth_id = 0
     buffered_rows = 0
-    written_rows = 0
+    written_bucket_rows = 0
     written_truth_rows = 0
 
     matched_segments = 0
@@ -595,17 +660,21 @@ def main():
     with diagnostic_context as diagnostics, uproot.recreate(
         args.output
     ) as output_file:
-        output_tree = output_file.mktree(
-            "EtaValidationInput",
-            OUTPUT_SCHEMA,
+        bucket_output_tree = output_file.mktree(
+            "HoughValidationBucket",
+            BUCKET_OUTPUT_SCHEMA,
         )
         truth_output_tree = output_file.mktree(
-            "EtaValidationTruth",
+            "HoughValidationTruth",
             TRUTH_OUTPUT_SCHEMA,
         )
 
+        # RootMuonSpacePointReader processes entries in stable event-id order.
+        print(f"Processing {number_events} events...")
+
         # 4. Process each event independently so bucket IDs remain event-local.
-        for space_entry, event_id_value in enumerate(space_event_ids):
+        for event_number, space_entry in enumerate(event_order):
+            event_id_value = space_event_ids[space_entry]
             event_id = int(event_id_value)
             truth_entry = truth_entry_by_event.get(event_id)
 
@@ -638,41 +707,12 @@ def main():
                 np.float32,
             )
 
-            sensor_phi = as_numpy(
-                space_data["spacePoint_sensorDirPhi"][space_entry],
-                np.float32,
-            )
-            sensor_theta = as_numpy(
-                space_data["spacePoint_sensorDirTheta"][space_entry],
-                np.float32,
-            )
-            next_phi = as_numpy(
-                space_data["spacePoint_toNextDirPhi"][space_entry],
-                np.float32,
-            )
-            next_theta = as_numpy(
-                space_data["spacePoint_toNextDirTheta"][space_entry],
-                np.float32,
-            )
-
             drift_radius = np.abs(as_numpy(
                 space_data["spacePoint_driftRadius"][space_entry],
                 np.float32,
             ))
-            hit_time = as_numpy(
-                space_data["spacePoint_time"][space_entry],
-                np.float32,
-            )
-            cov0 = as_numpy(
-                space_data["spacePoint_covLoc0"][space_entry],
-                np.float32,
-            )
             cov1 = as_numpy(
                 space_data["spacePoint_covLoc1"][space_entry],
-                np.float32,
-            )
-            cov_t = as_numpy(
-                space_data["spacePoint_covT"][space_entry],
                 np.float32,
             )
 
@@ -781,7 +821,7 @@ def main():
                     unmatched_segments += 1
                     continue
 
-                tan_beta, y0 = decoded
+                tan_beta, y0, tan_alpha, x0 = decoded
 
                 if segment_geometry_ids.size == 0:
                     if diagnostics is not None:
@@ -817,7 +857,7 @@ def main():
 
                     indices = bucket["indices"]
 
-                    mask, residuals, n_matching, mean_residual = (
+                    line_mask, residuals, _, _ = (
                         classify_hits(
                             local_y[indices],
                             local_z[indices],
@@ -827,11 +867,41 @@ def main():
                             args.truth_tolerance,
                         )
                     )
+                    geometry_mask = np.isin(
+                        geometry_ids[indices], segment_geometry_ids
+                    )
+                    measures_eta = (
+                        muon_ids[indices] & np.uint32(1 << 14)
+                    ) != 0
+                    truth_mask = (
+                        line_mask.astype(bool)
+                        & geometry_mask
+                        & measures_eta
+                    )
+                    n_matching = int(np.count_nonzero(truth_mask))
+                    mean_residual = (
+                        float(np.mean(residuals[truth_mask]))
+                        if n_matching > 0 else np.inf
+                    )
+
+                    phi_line_mask, _, _ = classify_phi_hits(
+                        local_x[indices], local_z[indices], tan_alpha, x0,
+                        args.phi_truth_tolerance,
+                    )
+                    measures_phi = (
+                        muon_ids[indices] & np.uint32(1 << 15)
+                    ) != 0
+                    phi_truth_mask = (
+                        phi_line_mask.astype(bool)
+                        & geometry_mask
+                        & measures_phi
+                    )
 
                     candidate = {
                         "source_bucket_id": source_bucket_id,
                         "indices": indices,
-                        "truth_mask": mask,
+                        "truth_mask": truth_mask.astype(np.uint8),
+                        "phi_truth_mask": phi_truth_mask.astype(np.uint8),
                         "residuals": residuals,
                         "n_truth_hits": n_matching,
                         "truth_fraction": n_matching / len(indices),
@@ -840,6 +910,8 @@ def main():
                         "segment_index": segment_index,
                         "tan_beta": tan_beta,
                         "y0": y0,
+                        "tan_alpha": tan_alpha,
+                        "x0": x0,
                     }
                     geometry_candidates.append(candidate)
 
@@ -885,6 +957,8 @@ def main():
                 best["segment_index"] = segment_index
                 best["tan_beta"] = tan_beta
                 best["y0"] = y0
+                best["tan_alpha"] = tan_alpha
+                best["x0"] = x0
 
                 segment_matches.append(best)
                 matched_segments += 1
@@ -915,77 +989,22 @@ def main():
 
             validation_id_by_source_bucket = {}
 
-            # 9. Write every physical bucket exactly once, including buckets
-            # without matched truth. Each hit becomes one ROOT tree entry.
+            # 9. Write every physical bucket exactly once. Space points remain
+            # in the original MuonSpacePoints tree and are not duplicated.
             for source_bucket_id, bucket in sorted(buckets.items()):
                 indices = bucket["indices"]
                 number_hits = len(indices)
-                selected_muon_ids = muon_ids[indices]
                 bucket_matches = matches_by_bucket[source_bucket_id]
 
-                def constant(value, dtype):
-                    return np.full(number_hits, value, dtype=dtype)
-
-                hit_buffers["validation_bucket_id"].append(
-                    constant(validation_bucket_id, np.uint32)
+                bucket_buffers["validation_bucket_id"].append(
+                    validation_bucket_id
                 )
-                hit_buffers["event_id"].append(
-                    constant(event_id, np.uint32)
-                )
-                hit_buffers["source_bucket_id"].append(
-                    constant(source_bucket_id, np.uint16)
-                )
-                hit_buffers["n_input_hits"].append(
-                    constant(number_hits, np.uint32)
-                )
-                hit_buffers["n_truth_segments"].append(
-                    constant(
-                        len(bucket_matches),
-                        np.uint16,
-                    )
-                )
-
-                hit_buffers["geometry_id"].append(
-                    geometry_ids[indices]
-                )
-                hit_buffers["muon_id"].append(
-                    selected_muon_ids
-                )
-                hit_buffers["local_pos_x"].append(
-                    local_x[indices]
-                )
-                hit_buffers["local_pos_y"].append(
-                    local_y[indices]
-                )
-                hit_buffers["local_pos_z"].append(
-                    local_z[indices]
-                )
-                hit_buffers["sensor_dir_phi"].append(
-                    sensor_phi[indices]
-                )
-                hit_buffers["sensor_dir_theta"].append(
-                    sensor_theta[indices]
-                )
-                hit_buffers["to_next_dir_phi"].append(
-                    next_phi[indices]
-                )
-                hit_buffers["to_next_dir_theta"].append(
-                    next_theta[indices]
-                )
-                hit_buffers["drift_radius"].append(
-                    drift_radius[indices]
-                )
-                hit_buffers["time"].append(
-                    hit_time[indices]
-                )
-                hit_buffers["cov_loc0"].append(
-                    cov0[indices]
-                )
-                hit_buffers["cov_loc1"].append(
-                    cov1[indices]
-                )
-                hit_buffers["cov_t"].append(
-                    cov_t[indices]
+                bucket_buffers["event_number"].append(event_number)
+                bucket_buffers["event_id"].append(event_id)
+                bucket_buffers["source_bucket_id"].append(source_bucket_id)
+                bucket_buffers["n_input_hits"].append(number_hits)
+                bucket_buffers["n_truth_segments"].append(
+                    len(bucket_matches)
                 )
 
                 validation_id_by_source_bucket[source_bucket_id] = (
@@ -993,11 +1012,11 @@ def main():
                 )
 
                 validation_bucket_id += 1
-                buffered_rows += number_hits
+                buffered_rows += 1
 
                 if buffered_rows >= args.flush_rows:
-                    written_rows += flush_hit_buffer(
-                        output_tree, hit_buffers
+                    written_bucket_rows += flush_bucket_buffer(
+                        bucket_output_tree, bucket_buffers
                     )
                     written_truth_rows += flush_truth_buffer(
                         truth_output_tree, truth_buffers
@@ -1013,8 +1032,11 @@ def main():
                     value["segment_index"],
                 ),
             ):
-                truth_hit_indices = np.flatnonzero(
+                eta_truth_hit_indices = np.flatnonzero(
                     match["truth_mask"]
+                ).astype(np.uint32, copy=False)
+                phi_truth_hit_indices = np.flatnonzero(
+                    match["phi_truth_mask"]
                 ).astype(np.uint32, copy=False)
 
                 truth_buffers["validation_truth_id"].append(
@@ -1025,6 +1047,7 @@ def main():
                         match["source_bucket_id"]
                     ]
                 )
+                truth_buffers["event_number"].append(event_number)
                 truth_buffers["event_id"].append(event_id)
                 truth_buffers["source_bucket_id"].append(
                     match["source_bucket_id"]
@@ -1032,31 +1055,41 @@ def main():
                 truth_buffers["segment_index"].append(
                     match["segment_index"]
                 )
-                truth_buffers["n_truth_hits"].append(
-                    match["n_truth_hits"]
+                truth_buffers["n_eta_truth_hits"].append(
+                    len(eta_truth_hit_indices)
+                )
+                truth_buffers["n_phi_truth_hits"].append(
+                    len(phi_truth_hit_indices)
                 )
                 truth_buffers["true_tanBeta"].append(
                     match["tan_beta"]
                 )
                 truth_buffers["true_y0"].append(match["y0"])
-                truth_buffers["truth_hit_indices"].append(
-                    truth_hit_indices
+                truth_buffers["true_tanAlpha"].append(match["tan_alpha"])
+                truth_buffers["true_x0"].append(match["x0"])
+                truth_buffers["eta_truth_hit_indices"].append(
+                    eta_truth_hit_indices
+                )
+                truth_buffers["phi_truth_hit_indices"].append(
+                    phi_truth_hit_indices
                 )
                 validation_truth_id += 1
 
-            if (space_entry + 1) % 1000 == 0:
+            if (event_number + 1) % 1000 == 0:
                 print(
-                    f"Processed {space_entry + 1}/{number_events}, "
+                    f"Processed {event_number + 1}/{number_events}, "
                     f"matched {matched_segments} segments, "
-                    f"written {written_rows} rows"
+                    f"written {written_bucket_rows} bucket rows"
                 )
 
-        written_rows += flush_hit_buffer(output_tree, hit_buffers)
+        written_bucket_rows += flush_bucket_buffer(
+            bucket_output_tree, bucket_buffers
+        )
         written_truth_rows += flush_truth_buffer(
             truth_output_tree, truth_buffers
         )
 
-    if written_rows == 0:
+    if written_bucket_rows == 0:
         raise RuntimeError("No source buckets were written")
 
     print(f"Output: {args.output}")
@@ -1067,7 +1100,7 @@ def main():
     print(f"Missing truth events: {missing_truth_events}")
     print(f"Validation buckets: {validation_bucket_id}")
     print(f"Validation truth segments: {validation_truth_id}")
-    print(f"Written hit rows: {written_rows}")
+    print(f"Written bucket rows: {written_bucket_rows}")
     print(f"Written truth rows: {written_truth_rows}")
     if args.unmatched_diagnostics:
         print(f"Unmatched segment CSV: {unmatched_prefix}_segments.csv")

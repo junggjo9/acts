@@ -9,12 +9,9 @@
 #include <boost/test/unit_test.hpp>
 
 #include "Acts/Definitions/Units.hpp"
-#include "Acts/Geometry/GeometryIdentifier.hpp"
 #include "Acts/Seeding/HoughTransformUtils.hpp"
 #include "Acts/Utilities/Logger.hpp"
 #include "Acts/Utilities/ScopedTimer.hpp"
-#include "Acts/Utilities/UnitVectors.hpp"
-#include "Acts/Utilities/VectorHelpers.hpp"
 #include "ActsExamples/Algorithms/TrackFinding/EtaHoughTransform.hpp"
 #include "ActsExamples/Framework/AlgorithmContext.hpp"
 #include "ActsExamples/Framework/WhiteBoard.hpp"
@@ -26,10 +23,10 @@
 #include "ActsTests/CommonHelpers/WhiteBoardUtilities.hpp"
 
 #include "../../Core/Seeding/StrawHitGeneratorHelper.hpp"
+#include "MuonHoughValidationData.hpp"
 
 #include <algorithm>
 #include <atomic>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -52,37 +49,12 @@
 
 #include <TFile.h>
 #include <TTree.h>
-#include <TTreeReader.h>
-#include <TTreeReaderArray.h>
-#include <TTreeReaderValue.h>
 #include <cuda_runtime.h>
 #include <tbb/blocked_range.h>
 #include <tbb/enumerable_thread_specific.h>
 
 namespace ActsTests {
 namespace {
-
-struct EtaValidationTruth {
-  std::uint32_t validationBucketId = 0u;
-  std::uint32_t eventId = 0u;
-  std::uint16_t sourceBucketId = 0u;
-  std::uint32_t segmentIndex = 0u;
-  double tanBeta = 0.0;
-  double y0 = 0.0;
-  std::vector<std::uint32_t> truthHitIndices{};
-};
-
-struct EtaValidationBucket {
-  std::uint32_t eventId = 0u;
-  std::uint16_t sourceBucketId = 0u;
-  std::uint16_t nTruthSegments = 0u;
-};
-
-struct EtaValidationBatch {
-  ActsExamples::CudaMuonSpacePointContainer spacePoints;
-  std::vector<EtaValidationBucket> buckets;
-  std::vector<EtaValidationTruth> truth;
-};
 
 struct GeneratedEtaTruth {
   double tanBeta = 0.0;
@@ -189,266 +161,6 @@ EtaValidationBatch makeGeneratedEtaValidationBatch(
   }
 
   return {std::move(spacePoints), std::move(buckets), std::move(truth)};
-}
-
-/// Host-side copy of one hit row read from EtaValidationInput.
-struct FileEtaHit {
-  Acts::GeometryIdentifier geometryId{};
-  std::uint32_t muonId = 0u;
-  Acts::Vector3 localPosition = Acts::Vector3::Zero();
-  Acts::Vector3 sensorDirection = Acts::Vector3::Zero();
-  Acts::Vector3 toNextSensor = Acts::Vector3::Zero();
-  double driftRadius = 0.0;
-  double time = 0.0;
-  std::array<double, 3> covariance{};
-};
-
-/// Read the two preprocessed ROOT trees and rebuild a CUDA validation batch.
-EtaValidationBatch fileReadEtaValidation(
-    const std::filesystem::path& inputPath,
-    std::size_t maximumBuckets = std::numeric_limits<std::size_t>::max()) {
-  using namespace Acts::UnitLiterals;
-
-  TFile inputFile{inputPath.c_str(), "READ"};
-  if (inputFile.IsZombie()) {
-    throw std::runtime_error("Failed to open " + inputPath.string());
-  }
-
-  // 1. EtaValidationInput contains one row per hit. Consecutive rows with the
-  // same validation_bucket_id are grouped back into a physical bucket.
-  TTreeReader reader{"EtaValidationInput", &inputFile};
-  if (reader.IsInvalid()) {
-    throw std::runtime_error(
-        "EtaValidationInput tree not found in " + inputPath.string());
-  }
-
-  TTreeReaderValue<UInt_t> validationBucketId{
-      reader, "validation_bucket_id"};
-  TTreeReaderValue<UInt_t> eventId{reader, "event_id"};
-  TTreeReaderValue<UShort_t> sourceBucketId{reader, "source_bucket_id"};
-  TTreeReaderValue<UInt_t> nInputHits{reader, "n_input_hits"};
-  TTreeReaderValue<UShort_t> nTruthSegments{reader, "n_truth_segments"};
-
-  TTreeReaderValue<ULong64_t> geometryId{reader, "geometry_id"};
-  TTreeReaderValue<UInt_t> muonId{reader, "muon_id"};
-  TTreeReaderValue<Float_t> localX{reader, "local_pos_x"};
-  TTreeReaderValue<Float_t> localY{reader, "local_pos_y"};
-  TTreeReaderValue<Float_t> localZ{reader, "local_pos_z"};
-  TTreeReaderValue<Float_t> sensorPhi{reader, "sensor_dir_phi"};
-  TTreeReaderValue<Float_t> sensorTheta{reader, "sensor_dir_theta"};
-  TTreeReaderValue<Float_t> nextPhi{reader, "to_next_dir_phi"};
-  TTreeReaderValue<Float_t> nextTheta{reader, "to_next_dir_theta"};
-  TTreeReaderValue<Float_t> driftRadius{reader, "drift_radius"};
-  TTreeReaderValue<Float_t> time{reader, "time"};
-  TTreeReaderValue<Float_t> cov0{reader, "cov_loc0"};
-  TTreeReaderValue<Float_t> cov1{reader, "cov_loc1"};
-  TTreeReaderValue<Float_t> covT{reader, "cov_t"};
-
-  std::vector<std::vector<FileEtaHit>> buckets;
-  std::vector<EtaValidationBucket> bucketMetadata;
-  std::vector<FileEtaHit> currentHits;
-
-  bool hasCurrentBucket = false;
-  UInt_t currentValidationBucket = 0u;
-  UInt_t currentEvent = 0u;
-  UShort_t currentSourceBucket = 0u;
-  UInt_t currentInputHits = 0u;
-  UShort_t currentTruthSegments = 0u;
-
-  // Finalize a bucket when its identifier changes. These checks also validate
-  // that the ROOT file is complete and ordered as promised by preprocessing.
-  const auto flushBucket = [&]() {
-    if (!hasCurrentBucket) {
-      return;
-    }
-
-    if (currentValidationBucket != buckets.size()) {
-      throw std::runtime_error(
-          "EtaValidationInput bucket identifiers are not dense and ordered");
-    }
-
-    if (currentHits.size() != currentInputHits) {
-      throw std::runtime_error(
-          "Input-hit count mismatch in validation bucket " +
-          std::to_string(currentValidationBucket));
-    }
-
-    if (buckets.size() < maximumBuckets) {
-      buckets.push_back(std::move(currentHits));
-      bucketMetadata.push_back(
-          {currentEvent, currentSourceBucket, currentTruthSegments});
-    }
-
-    currentHits.clear();
-  };
-
-  const auto makeDirection = [](double phiDegrees, double thetaDegrees) {
-    return Acts::makeDirectionFromPhiTheta<double>(
-        phiDegrees * 1._degree, thetaDegrees * 1._degree);
-  };
-
-  // 2. reader.Next() loads one hit row and refreshes all bound branch values.
-  while (reader.Next()) {
-    const bool newBucket =
-        !hasCurrentBucket ||
-        *validationBucketId != currentValidationBucket;
-
-    if (newBucket) {
-      flushBucket();
-
-      if (buckets.size() >= maximumBuckets) {
-        break;
-      }
-
-      hasCurrentBucket = true;
-      currentValidationBucket = *validationBucketId;
-      currentEvent = *eventId;
-      currentSourceBucket = *sourceBucketId;
-      currentInputHits = *nInputHits;
-      currentTruthSegments = *nTruthSegments;
-    } else if (*eventId != currentEvent ||
-               *sourceBucketId != currentSourceBucket ||
-               *nInputHits != currentInputHits ||
-               *nTruthSegments != currentTruthSegments) {
-      throw std::runtime_error(
-          "Metadata changed inside validation bucket " +
-          std::to_string(currentValidationBucket));
-    }
-
-    FileEtaHit hit{};
-    hit.geometryId = Acts::GeometryIdentifier{
-        static_cast<Acts::GeometryIdentifier::Value>(*geometryId)};
-    hit.muonId = *muonId;
-    hit.localPosition = Acts::Vector3{*localX, *localY, *localZ};
-    hit.sensorDirection = makeDirection(*sensorPhi, *sensorTheta);
-    hit.toNextSensor = makeDirection(*nextPhi, *nextTheta);
-    hit.driftRadius = std::abs(*driftRadius);
-    hit.time = *time;
-    hit.covariance = {*cov0, *cov1, *covT};
-
-    currentHits.push_back(std::move(hit));
-  }
-
-  if (buckets.size() < maximumBuckets) {
-    flushBucket();
-  }
-
-  if (buckets.empty()) {
-    throw std::runtime_error(
-        "EtaValidationInput contains no source bucket");
-  }
-
-  // 3. EtaValidationTruth is normalized separately: one row per segment.
-  // TTreeReaderArray handles truth_hit_indices because that branch has a
-  // variable number of bucket-local indices in each row.
-  TTreeReader truthReader{"EtaValidationTruth", &inputFile};
-  if (truthReader.IsInvalid()) {
-    throw std::runtime_error(
-        "EtaValidationTruth tree not found in " + inputPath.string());
-  }
-
-  TTreeReaderValue<UInt_t> validationTruthId{
-      truthReader, "validation_truth_id"};
-  TTreeReaderValue<UInt_t> truthBucketId{
-      truthReader, "validation_bucket_id"};
-  TTreeReaderValue<UInt_t> truthEventId{truthReader, "event_id"};
-  TTreeReaderValue<UShort_t> truthSourceBucketId{
-      truthReader, "source_bucket_id"};
-  TTreeReaderValue<UInt_t> segmentIndex{truthReader, "segment_index"};
-  TTreeReaderValue<UInt_t> nTruthHits{truthReader, "n_truth_hits"};
-  TTreeReaderValue<Double_t> trueTanBeta{truthReader, "true_tanBeta"};
-  TTreeReaderValue<Double_t> trueY0{truthReader, "true_y0"};
-  TTreeReaderArray<UInt_t> truthHitIndices{
-      truthReader, "truth_hit_indices"};
-
-  std::vector<EtaValidationTruth> truth{};
-  std::vector<std::uint16_t> countedTruthSegments(buckets.size(), 0u);
-
-  // Validate every reference before copying it into the common truth model.
-  while (truthReader.Next()) {
-    if (*truthBucketId >= buckets.size()) {
-      continue;
-    }
-
-    if (*validationTruthId != truth.size()) {
-      throw std::runtime_error(
-          "EtaValidationTruth identifiers are not dense and ordered");
-    }
-
-    const EtaValidationBucket& metadata = bucketMetadata[*truthBucketId];
-    if (*truthEventId != metadata.eventId ||
-        *truthSourceBucketId != metadata.sourceBucketId) {
-      throw std::runtime_error(
-          "Truth metadata disagrees with validation bucket metadata");
-    }
-
-    if (truthHitIndices.GetSize() != *nTruthHits) {
-      throw std::runtime_error(
-          "Truth-hit count mismatch in validation truth record " +
-          std::to_string(*validationTruthId));
-    }
-
-    std::vector<std::uint8_t> seen(buckets[*truthBucketId].size(), 0u);
-    for (const UInt_t localHitIndex : truthHitIndices) {
-      if (localHitIndex >= seen.size() || seen[localHitIndex] != 0u) {
-        throw std::runtime_error(
-            "Invalid or duplicate local truth-hit index in truth record " +
-            std::to_string(*validationTruthId));
-      }
-      seen[localHitIndex] = 1u;
-    }
-
-    truth.push_back(
-        {*truthBucketId, *truthEventId, *truthSourceBucketId, *segmentIndex,
-         *trueTanBeta, *trueY0,
-         std::vector<std::uint32_t>(truthHitIndices.begin(),
-                                    truthHitIndices.end())});
-    ++countedTruthSegments[*truthBucketId];
-  }
-
-  for (std::size_t bucket = 0u; bucket < buckets.size(); ++bucket) {
-    if (countedTruthSegments[bucket] !=
-        bucketMetadata[bucket].nTruthSegments) {
-      throw std::runtime_error(
-          "Truth-segment count mismatch in validation bucket " +
-          std::to_string(bucket));
-    }
-  }
-
-  // 4. Flatten temporary host buckets into the contiguous representation used
-  // by CUDA, while addBucket preserves every half-open bucket hit range.
-  const std::size_t totalHits =
-      std::accumulate(buckets.begin(), buckets.end(), std::size_t{0u},
-                      [](std::size_t sum, const auto& bucket) {
-                        return sum + bucket.size();
-                      });
-
-  ActsExamples::CudaMuonSpacePointContainer spacePoints{totalHits};
-
-  std::size_t outputHit = 0u;
-  for (const auto& bucket : buckets) {
-    const std::size_t bucketStart = outputHit;
-
-    for (const FileEtaHit& hit : bucket) {
-      spacePoints.setGeometryId(outputHit, hit.geometryId.value());
-      spacePoints.setId(outputHit, hit.muonId);
-      spacePoints.defineCoordinates(outputHit, hit.localPosition,
-                                    hit.sensorDirection, hit.toNextSensor);
-      spacePoints.setRadius(outputHit, hit.driftRadius);
-      spacePoints.setTime(outputHit, hit.time);
-      spacePoints.setCovariance(outputHit, hit.covariance[0],
-                                hit.covariance[1], hit.covariance[2]);
-      ++outputHit;
-    }
-
-    spacePoints.addBucket(bucketStart, outputHit);
-  }
-
-  if (spacePoints.bucketCount() != bucketMetadata.size()) {
-    throw std::runtime_error("Metadata and CUDA bucket counts differ");
-  }
-
-  return {std::move(spacePoints), std::move(bucketMetadata), std::move(truth)};
 }
 
 }  // namespace
@@ -1472,8 +1184,8 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_straw_generator_validation) {
 }
 
 BOOST_AUTO_TEST_CASE(cuda_hough_eta_file_validation) {
-  // Realistic end-to-end sample prepared by preprocessor_pg.py. The environment
-  // variable permits the large flat ROOT input to live outside the build tree.
+  // Space points are read through the production ROOT reader. Validation truth
+  // is consumed later by the analysis and is not loaded by this benchmark.
   // ACTS_MUON_ETA_IMPLEMENTATION selects the CUDA implementation or the
   // original CPU Eta transform. ACTS_MUON_CUDA_PEAK_FINDER selects the CUDA
   // peak finder. ACTS_MUON_ETA_BINS_X and ACTS_MUON_ETA_BINS_Y can force
@@ -1483,24 +1195,23 @@ BOOST_AUTO_TEST_CASE(cuda_hough_eta_file_validation) {
   // per-worker CUDA processors are used by the latter.
   // ACTS_MUON_CUDA_BLOCKS_PER_EVENT limits the CUDA grids for each event; zero
   // preserves their default launch sizes.
-  const char* environmentPath =
-      std::getenv("ACTS_MUON_VALIDATION_FLAT_ROOT");
+  const char* spacePointEnvironment =
+      std::getenv("ACTS_MUON_SPACEPOINT_ROOT");
+  const std::filesystem::path spacePointPath =
+      spacePointEnvironment != nullptr ? spacePointEnvironment
+                                       : "MuonSpacePoints.root";
 
-  const std::filesystem::path inputPath =
-      environmentPath != nullptr ? environmentPath : "EtaHoughFlatInput.root";
+  BOOST_TEST_MESSAGE("spacePointPath: " << spacePointPath);
 
-  BOOST_TEST_MESSAGE("inputPath: " << inputPath);
-
-  if (!std::filesystem::exists(inputPath)) {
-    BOOST_TEST_MESSAGE("Flat validation file not found: "
-                       << inputPath << ". Run preprocessor_pg.py first or set "
-                                       "ACTS_MUON_VALIDATION_FLAT_ROOT.");
+  if (!std::filesystem::exists(spacePointPath)) {
+    BOOST_TEST_MESSAGE("Space-point input not found. Set "
+                       "ACTS_MUON_SPACEPOINT_ROOT.");
 
     BOOST_TEST_MESSAGE("Skipping test");
     return;
   }
 
-  auto loaded = fileReadEtaValidation(inputPath);
+  auto loaded = fileReadEtaValidation(spacePointPath);
 
   const Acts::HoughTransformUtils::HoughAxisRanges axisRanges{
       -3.0, 3.0, -100.0 * Acts::UnitConstants::m,
