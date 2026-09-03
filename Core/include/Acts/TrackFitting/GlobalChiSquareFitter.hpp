@@ -1093,11 +1093,8 @@ class Gx2Fitter {
           const auto& particle = startParameters->particleHypothesis();
 
           const double qOverP = stepper.qOverP(state.stepping);
-<<<<<<< Updated upstream
-=======
           ACTS_VERBOSE("The paricle has momentum " <<(1./qOverP)*particle.absoluteCharge() << " and charge "
                        << particle.absoluteCharge());
->>>>>>> Stashed changes
 
           eLoss = ELossAtSurface{
               computeEnergyLossMean(slab, particle.absolutePdg(),
