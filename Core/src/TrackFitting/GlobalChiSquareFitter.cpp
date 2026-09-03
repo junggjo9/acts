@@ -39,7 +39,7 @@ const Acts::Matrix<eBoundSize, 1> qOverPProjector = [] {
 }();
 
 //Heavyside function to return 1 if the energy loss is positive, 0 otherwise
-const double Heavyside(const double eLoss) { return (eLoss > 0) ? 1. : 0.; }
+const double Heavyside(const double eLoss) { return (eLoss >= 0) ? 1. : 0.; }
 
 void Gx2fMaterialProperties::updateParameters(
     const Eigen::VectorXd& deltaParamsExtended, const std::size_t stateIdx) {
@@ -48,8 +48,9 @@ void Gx2fMaterialProperties::updateParameters(
     m_scatTheta += deltaParamsExtended[stateIdx + 1ul];
   }
   if (m_eloss.isValid()) {
-    const std::size_t eLossIdx = stateIdx + (nDim() - 1ul);
+    const std::size_t eLossIdx = stateIdx + (nDim() - 1ul);  
     m_lostEnergy += deltaParamsExtended[eLossIdx];
+    
   }
 }
 
@@ -60,14 +61,20 @@ void Gx2fMaterialProperties::updateTrackParameters(
     trackPars.parameters()[eBoundTheta] += deltaTheta();
   }
   if (m_eloss.isValid()) {
+    
     const ParticleHypothesis& hypot = trackPars.particleHypothesis();
+    const double nextE = fastHypot(hypot.mass(), trackPars.absoluteMomentum()) - m_lostEnergy;
     const double qOverPBefore = trackPars.parameters()[eBoundQOverP];
-    const double pAfter = trackPars.absoluteMomentum() - m_lostEnergy;
+    const double pAfter = (hypot.mass() < nextE) ? fastCathetus(nextE, hypot.mass()) : 0;
     
     if (pAfter <= Acts::s_epsilon) {
       // Fitted loss exceeds the available momentum: leave the parameters
       // untouched, and degrade to no contribution rather than a division by
       // zero.
+      // ACTS_WARNING("Fitted energy loss exceeds available momentum. "
+      //               << "Momentum before: " << trackPars.absoluteMomentum()
+      //               << ", fitted loss: " << m_lostEnergy
+      //               << ", fitted momentum after: " << pAfter);
       m_qOverPderiv = 0.;
       m_qOverPratio = 1.;
       return;
@@ -75,6 +82,7 @@ void Gx2fMaterialProperties::updateTrackParameters(
 
     trackPars.parameters()[eBoundQOverP] = hypot.qOverP(
         pAfter, trackPars.charge());
+      //std::cout<<"Update q/p from " << qOverPBefore << " to " << trackPars.parameters()[eBoundQOverP] << std::endl;
         //chache the derivative of q/p with respect to energy loss for the Gx2f system and the qoverp ratio before and after
         // we are gonna need them for the bVecror and aMatrix for measurements after material surfaces the residuals of which depend on the updated q/p value after the energy loss
     m_qOverPderiv = trackPars.charge() /Acts::square(pAfter);
@@ -129,7 +137,7 @@ void Gx2fMaterialProperties::contributionToGx2fSums(
     extendedSystem.chi2() += Acts::square(
         (m_lostEnergy - m_eloss.lostEnergy()) / m_eloss.lostSigma());
     //The energy loss constraint to require only positive energy loss for the free parameter
-    constexpr double Nepsilon = 1e6;
+    constexpr double Nepsilon = 0.;
     extendedSystem.chi2() += Nepsilon * Acts::square(m_lostEnergy) * Heavyside(-m_lostEnergy);
     extendedSystem.bVector()(eLossIdx, 0) -= Nepsilon *  m_lostEnergy * Heavyside(-m_lostEnergy);
     extendedSystem.aMatrix()(eLossIdx, eLossIdx) += Nepsilon * Heavyside(-m_lostEnergy);
@@ -181,14 +189,16 @@ void updateGx2fParams(
 
 void updateGx2fCovarianceParams(BoundMatrix& fullCovariancePredicted,
                                 Gx2fSystem& extendedSystem) {
-  // make invertible
+  
+  const std::size_t nDof = extendedSystem.findRequiredNdf();
+                                  // make invertible
   for (std::size_t i = 0; i < extendedSystem.nDims(); ++i) {
     if (extendedSystem.aMatrix()(i, i) == 0.) {
       extendedSystem.aMatrix()(i, i) = 1.;
     }
   }
 
-  visit_measurement(extendedSystem.findRequiredNdf(), [&](auto N) {
+  visit_measurement(nDof, [&](auto N) {
     fullCovariancePredicted.topLeftCorner<N, N>() =
         extendedSystem.aMatrix().inverse().topLeftCorner<N, N>();
   });
@@ -238,7 +248,7 @@ void addMeasurementToGx2fSumsBackend(
                                            << extendedSystem.nDims());
 
     // check the dimension of the material map: 2 means only scattering, 3 means
-    // scattering and energy loss
+    // scattering and energy loss amd 1 only energy loss
     const std::size_t matDim = materialIndices.at(matSurface) - deltaPosition;
 
     // check if energy loss is enabled, if yes, we need to add the q/p

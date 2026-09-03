@@ -358,7 +358,7 @@ struct Gx2FitterOptions {
   /// Flag to toggle whether material is fitted simultaneously with
   /// the track parameters or whether the material update is just
   /// a small adjustment to the track parameters
-  bool includeMaterialInIter = false;
+  bool includeMaterialInIter = true;
 
   /// Cutoff value on the scattering uncertainty to fine tune the number of
   /// scattering angles in the fit. Instead of creating scattering states at
@@ -618,7 +618,7 @@ void fillGx2fSystem(
     ACTS_DEBUG("Start to investigate trackState on surface " << geoId);
     const auto typeFlags = trackState.typeFlags();
 
-    // update all Jacobians from start
+    // update all Jacobians from start for every track state
     for (auto& jac : jacobianFromStart) {
       jac = trackState.jacobian() * jac;
     }
@@ -677,9 +677,10 @@ void fillGx2fSystem(
       if(std::abs(qOverPratio - 1.) > 1e-6) {
         ACTS_DEBUG("    Update Jacobian for q/p after material surface "
                     << geoId << " with ratio " << qOverPratio);
-        for(auto& jac : jacobianFromStart) {
-          jac.row(eBoundQOverP) *= qOverPratio;
-        }
+
+        for (auto& jac : jacobianFromStart) {
+          jac.row(eBoundQOverP) *= qOverPratio;   // existing entries cross this surface
+        }        
       }
       // Add for this material a new Jacobian, starting from this surface.
       jacobianFromStart.emplace_back(BoundMatrix::Identity());
@@ -1015,6 +1016,8 @@ class Gx2Fitter {
                                  const navigator_t& navigator,
                                  result_type& result) const {
       if (!doMultipleScattering && !doEnergyLoss) {
+        ACTS_DEBUG(__func__ << " | "
+                   << "Multiple scattering and energy loss are disabled. Returning");
         return Result<void>::success();
       }
       const Surface* surface = navigator.currentSurface(state.navigation);
@@ -1049,7 +1052,7 @@ class Gx2Fitter {
               Acts::detail::determineMaterialUpdateMode(
                   state, navigator, MaterialUpdateMode::FullUpdate));
       if (!slabResult.ok()) {
-        ACTS_DEBUG("GlobalChiSquareFitter | "
+        ACTS_DEBUG(__func__ << " | "
                    << "Failed to evaluate material slab: "
                    << slabResult.error());
         return Result<void>::failure(slabResult.error());
@@ -1090,6 +1093,11 @@ class Gx2Fitter {
           const auto& particle = startParameters->particleHypothesis();
 
           const double qOverP = stepper.qOverP(state.stepping);
+<<<<<<< Updated upstream
+=======
+          ACTS_VERBOSE("The paricle has momentum " <<(1./qOverP)*particle.absoluteCharge() << " and charge "
+                       << particle.absoluteCharge());
+>>>>>>> Stashed changes
 
           eLoss = ELossAtSurface{
               computeEnergyLossMean(slab, particle.absolutePdg(),
@@ -1099,6 +1107,10 @@ class Gx2Fitter {
               static_cast<double>(Acts::computeEnergyLossLandauSigma(
                   slab, particle.mass(), static_cast<float>(qOverP),
                   particle.absoluteCharge()))};
+
+          ACTS_VERBOSE("        The Bethe-Bloch formula gives energy loss "
+                       << eLoss.lostEnergy() << " with uncertainty "
+                       << eLoss.lostSigma());
         }
       }
 
@@ -1118,7 +1130,9 @@ class Gx2Fitter {
       } else {
         result.accEloss = ELossAtSurface{};
       }
-
+      ACTS_DEBUG("    ... add entry in material map with scattering "
+                 << scatterer.sigma() << " and energy loss "
+                 << eLoss.lostEnergy());
       materialMapId =
           result.materialMap
               .emplace(geoId, Gx2fMaterialProperties{std::move(scatterer),
@@ -1235,6 +1249,12 @@ class Gx2Fitter {
       // Add the measurement surface as external surface to the navigator.
       // We will try to hit those surface by ignoring boundary checks.
       for (const auto& [surface, _] : inputMeasurements) {
+        //check if it has material
+        if(surface->hasMaterial()) {
+          ACTS_DEBUG("Surface " << surface->geometryId() << " has material. Add to external surfaces.");
+            std::cin.ignore();
+        }
+      
         propagatorOptions.navigation.appendExternalSurface(*surface);
       }
 
@@ -1389,6 +1409,14 @@ class Gx2Fitter {
     }
     ACTS_DEBUG("Iterations finished");
     ACTS_VERBOSE("Final parameters: " << params.parameters().transpose());
+    ACTS_VERBOSE("Final scattering angles and energy loss:");
+      for (const auto& [key, value] : materialMap) {
+        if (!value.materialIsValid()) {
+          continue;
+        }
+        ACTS_VERBOSE("    ( " << value.deltaTheta() << " | " << value.deltaPhi()
+                            << "|"<< value.lostEnergy() << " )");
+    }
     /// Finish Fitting /////////////////////////////////////////////////////////
 
     /// Actual MATERIAL Fitting ////////////////////////////////////////////////
@@ -1428,6 +1456,8 @@ class Gx2Fitter {
 
       auto& r = propagatorState.template get<Gx2FitterResult<traj_t>>();
       r.fittedStates = &trajectoryTempBackend;
+      r.materialMap = std::move(materialMap);
+
 
       // Clear the track container. It could be more performant to update the
       // existing states, but this needs some more thinking.
@@ -1449,7 +1479,7 @@ class Gx2Fitter {
       // makeMeasurements
       auto& propRes = *result;
       GX2FResult gx2fResult = std::move(propRes.template get<GX2FResult>());
-
+      materialMap = std::move(gx2fResult.materialMap);
       auto track = trackContainerTemp.makeTrack();
       tipIndex = gx2fResult.lastMeasurementIndex;
 
@@ -1521,15 +1551,15 @@ class Gx2Fitter {
       /// Finish MATERIAL Fitting
       /// ////////////////////////////////////////////////
 
-    ACTS_VERBOSE("Final scattering angles:");
+    ACTS_VERBOSE("Final scattering angles and energy loss:");
       for (const auto& [key, value] : materialMap) {
-      if (!value.materialIsValid()) {
-        continue;
-      }
+        if (!value.materialIsValid()) {
+          continue;
+        }
         ACTS_VERBOSE("    ( " << value.deltaTheta() << " | " << value.deltaPhi()
-                            << " )");
+                            << "|"<< value.lostEnergy() << " )");
     }
-    }
+  }
     ACTS_VERBOSE("Final covariance:\n" << fullCovariancePredicted);
 
     // Propagate again with the final covariance matrix. This is necessary to
