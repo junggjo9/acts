@@ -609,6 +609,8 @@ void fillGx2fSystem(
   jacobianFromStart.emplace_back(BoundMatrix::Identity());
   geoIdVector.reserve(track.nTrackStates());
   std::vector<double> qOverPderiv;
+
+  bool foundELoss{false};
   for (const auto& trackState : track.trackStates()) {
     // Get and store geoId for the current surface
     const GeometryIdentifier geoId = trackState.referenceSurface().geometryId();
@@ -660,6 +662,10 @@ void fillGx2fSystem(
       if (materialMapId->second.nDim() == 0ul) {
         continue;
       }
+      if (materialMapId->second.energyLoss().isValid()) {
+        ACTS_VERBOSE("The material surface carries energy loss");
+        foundEloss = true;
+      }
       const std::size_t deltaPosition =
           materialParamIndices.at(geoIdVector.size());
       geoIdVector.push_back(geoId);
@@ -670,15 +676,11 @@ void fillGx2fSystem(
 
       // after material surfaces, the measurements depend on the updated qoverp
       // we need to scale the jacobian term for the qoverp row
-      const double qOverPratio = materialMapId->second.qOverPratio();
-      if (std::abs(qOverPratio - 1.) > 1e-6) {
+      if (foundEloss) {
         ACTS_DEBUG("    Update Jacobian for q/p after material surface "
                    << geoId << " with ratio " << qOverPratio);
-
-        for (auto& jac : jacobianFromStart) {
-          jac.row(eBoundQOverP) *=
-              qOverPratio;  // existing entries cross this surface
-        }
+        jacobianFromStart.front().row(eBoundQOverP) *=
+            materialMapId->second.qOverPratio();
       }
       // Add for this material a new Jacobian, starting from this surface.
       jacobianFromStart.emplace_back(BoundMatrix::Identity());
@@ -773,7 +775,7 @@ class Gx2Fitter {
   ///
   /// The GX2F Actor does not rely on the measurements to be sorted along the
   /// track.
-  class Actor {
+  class GX2FActor {
    public:
     /// Broadcast the result_type
     using result_type = Gx2FitterResult<traj_t>;
@@ -1200,9 +1202,6 @@ class Gx2Fitter {
                                     *it);
     }
 
-    // Create the ActorList
-    using GX2FActor = Actor;
-
     using GX2FResult = typename GX2FActor::result_type;
     using Actors = Acts::ActorList<GX2FActor>;
 
@@ -1254,13 +1253,6 @@ class Gx2Fitter {
       // Add the measurement surface as external surface to the navigator.
       // We will try to hit those surface by ignoring boundary checks.
       for (const auto& [surface, _] : inputMeasurements) {
-        // check if it has material
-        if (surface->hasMaterial()) {
-          ACTS_DEBUG("Surface " << surface->geometryId()
-                                << " has material. Add to external surfaces.");
-          std::cin.ignore();
-        }
-
         propagatorOptions.navigation.appendExternalSurface(*surface);
       }
 

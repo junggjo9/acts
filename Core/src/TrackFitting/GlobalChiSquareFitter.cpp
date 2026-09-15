@@ -38,11 +38,6 @@ const Acts::Matrix<eBoundSize, 1> qOverPProjector = [] {
   return m;
 }();
 
-// Heavyside function to return 1 if the energy loss is positive, 0 otherwise
-const double Heavyside(const double eLoss) {
-  return (eLoss >= 0) ? 1. : 0.;
-}
-
 void Gx2fMaterialProperties::updateParameters(
     const Eigen::VectorXd& deltaParamsExtended, const std::size_t stateIdx) {
   if (m_scatterer.isValid()) {
@@ -145,13 +140,14 @@ void Gx2fMaterialProperties::contributionToGx2fSums(
         (m_lostEnergy - m_eloss.lostEnergy()) / m_eloss.lostSigma());
     // The energy loss constraint to require only positive energy loss for the
     // free parameter
-    constexpr double Nepsilon = 0.;
-    extendedSystem.chi2() +=
-        Nepsilon * Acts::square(m_lostEnergy) * Heavyside(-m_lostEnergy);
-    extendedSystem.bVector()(eLossIdx, 0) -=
-        Nepsilon * m_lostEnergy * Heavyside(-m_lostEnergy);
-    extendedSystem.aMatrix()(eLossIdx, eLossIdx) +=
-        Nepsilon * Heavyside(-m_lostEnergy);
+    constexpr double Nepsilon = Acts::square(1. / 10._keV);
+    if (m_lostEnergy < 10._keV) {
+      ACTS_VERBOSE(
+          "Add penalty term to the chi2 to push the energy loss above zero");
+      extendedSystem.chi2() += Nepsilon * Acts::square(m_lostEnergy);
+      extendedSystem.bVector()(eLossIdx, 0) -= Nepsilon * m_lostEnergy;
+      extendedSystem.aMatrix()(eLossIdx, eLossIdx) += Nepsilon;
+    }
     ACTS_VERBOSE("Energy loss contributions in contributionToGx2fSums:\n"
                  << "       index: " << eLossIdx << " \n"
                  << "       measured loss: " << m_eloss.lostEnergy() << "+-"
