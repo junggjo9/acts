@@ -38,8 +38,10 @@ const Acts::Matrix<eBoundSize, 1> qOverPProjector = [] {
   return m;
 }();
 
-//Heavyside function to return 1 if the energy loss is positive, 0 otherwise
-const double Heavyside(const double eLoss) { return (eLoss >= 0) ? 1. : 0.; }
+// Heavyside function to return 1 if the energy loss is positive, 0 otherwise
+const double Heavyside(const double eLoss) {
+  return (eLoss >= 0) ? 1. : 0.;
+}
 
 void Gx2fMaterialProperties::updateParameters(
     const Eigen::VectorXd& deltaParamsExtended, const std::size_t stateIdx) {
@@ -48,9 +50,8 @@ void Gx2fMaterialProperties::updateParameters(
     m_scatTheta += deltaParamsExtended[stateIdx + 1ul];
   }
   if (m_eloss.isValid()) {
-    const std::size_t eLossIdx = stateIdx + (nDim() - 1ul);  
+    const std::size_t eLossIdx = stateIdx + (nDim() - 1ul);
     m_lostEnergy += deltaParamsExtended[eLossIdx];
-    
   }
 }
 
@@ -61,12 +62,13 @@ void Gx2fMaterialProperties::updateTrackParameters(
     trackPars.parameters()[eBoundTheta] += deltaTheta();
   }
   if (m_eloss.isValid()) {
-    
     const ParticleHypothesis& hypot = trackPars.particleHypothesis();
-    const double nextE = fastHypot(hypot.mass(), trackPars.absoluteMomentum()) - m_lostEnergy;
+    const double nextE =
+        fastHypot(hypot.mass(), trackPars.absoluteMomentum()) - m_lostEnergy;
     const double qOverPBefore = trackPars.parameters()[eBoundQOverP];
-    const double pAfter = (hypot.mass() < nextE) ? fastCathetus(nextE, hypot.mass()) : 0;
-    
+    const double pAfter =
+        (hypot.mass() < nextE) ? fastCathetus(nextE, hypot.mass()) : 0;
+
     if (pAfter <= Acts::s_epsilon) {
       // Fitted loss exceeds the available momentum: leave the parameters
       // untouched, and degrade to no contribution rather than a division by
@@ -80,13 +82,18 @@ void Gx2fMaterialProperties::updateTrackParameters(
       return;
     }
 
-    trackPars.parameters()[eBoundQOverP] = hypot.qOverP(
-        pAfter, trackPars.charge());
-      //std::cout<<"Update q/p from " << qOverPBefore << " to " << trackPars.parameters()[eBoundQOverP] << std::endl;
-        //chache the derivative of q/p with respect to energy loss for the Gx2f system and the qoverp ratio before and after
-        // we are gonna need them for the bVecror and aMatrix for measurements after material surfaces the residuals of which depend on the updated q/p value after the energy loss
-    m_qOverPderiv = trackPars.charge() /Acts::square(pAfter);
-    m_qOverPratio = Acts::square(trackPars.parameters()[eBoundQOverP]/ qOverPBefore);
+    trackPars.parameters()[eBoundQOverP] =
+        hypot.qOverP(pAfter, trackPars.charge());
+    // std::cout<<"Update q/p from " << qOverPBefore << " to " <<
+    // trackPars.parameters()[eBoundQOverP] << std::endl; cache the derivative
+    // of q/p with respect to energy loss for the Gx2f system and the qoverp
+    // ratio before and after
+    //  we are gonna need them for the bVecror and aMatrix for measurements
+    //  after material surfaces the residuals of which depend on the updated q/p
+    //  value after the energy loss
+    m_qOverPderiv = trackPars.charge() / Acts::square(pAfter);
+    m_qOverPratio =
+        Acts::square(trackPars.parameters()[eBoundQOverP] / qOverPBefore);
   }
 }
 
@@ -136,11 +143,15 @@ void Gx2fMaterialProperties::contributionToGx2fSums(
         (m_lostEnergy - m_eloss.lostEnergy());
     extendedSystem.chi2() += Acts::square(
         (m_lostEnergy - m_eloss.lostEnergy()) / m_eloss.lostSigma());
-    //The energy loss constraint to require only positive energy loss for the free parameter
+    // The energy loss constraint to require only positive energy loss for the
+    // free parameter
     constexpr double Nepsilon = 0.;
-    extendedSystem.chi2() += Nepsilon * Acts::square(m_lostEnergy) * Heavyside(-m_lostEnergy);
-    extendedSystem.bVector()(eLossIdx, 0) -= Nepsilon *  m_lostEnergy * Heavyside(-m_lostEnergy);
-    extendedSystem.aMatrix()(eLossIdx, eLossIdx) += Nepsilon * Heavyside(-m_lostEnergy);
+    extendedSystem.chi2() +=
+        Nepsilon * Acts::square(m_lostEnergy) * Heavyside(-m_lostEnergy);
+    extendedSystem.bVector()(eLossIdx, 0) -=
+        Nepsilon * m_lostEnergy * Heavyside(-m_lostEnergy);
+    extendedSystem.aMatrix()(eLossIdx, eLossIdx) +=
+        Nepsilon * Heavyside(-m_lostEnergy);
     ACTS_VERBOSE("Energy loss contributions in contributionToGx2fSums:\n"
                  << "       index: " << eLossIdx << " \n"
                  << "       measured loss: " << m_eloss.lostEnergy() << "+-"
@@ -189,9 +200,8 @@ void updateGx2fParams(
 
 void updateGx2fCovarianceParams(BoundMatrix& fullCovariancePredicted,
                                 Gx2fSystem& extendedSystem) {
-  
   const std::size_t nDof = extendedSystem.findRequiredNdf();
-                                  // make invertible
+  // make invertible
   for (std::size_t i = 0; i < extendedSystem.nDims(); ++i) {
     if (extendedSystem.aMatrix()(i, i) == 0.) {
       extendedSystem.aMatrix()(i, i) = 1.;
@@ -253,7 +263,7 @@ void addMeasurementToGx2fSumsBackend(
 
     // check if energy loss is enabled, if yes, we need to add the q/p
     // projection in the extended jacobian
-     switch (matDim) {
+    switch (matDim) {
       case 1: {  // energy loss only
         Acts::Matrix<eBoundSize, 1> proj = qOverPProjector;
         proj(eBoundQOverP, 0) = qOverPderiv.at(matSurface - 1);
